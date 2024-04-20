@@ -13,7 +13,7 @@ struct TestObject {
     counter: usize,
 }
 
-static MUTEX: OnceLock<BorrowMutex<TestObject>> = OnceLock::new();
+static MUTEX: OnceLock<BorrowMutex<16, TestObject>> = OnceLock::new();
 
 #[test]
 fn borrow_single_threaded() {
