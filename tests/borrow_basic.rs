@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use borrow_mutex::BorrowMutex;
-use futures::{select, FutureExt};
+use futures::{join, select, FutureExt};
 use smol::Timer;
 
 #[derive(Debug)]
@@ -13,16 +12,13 @@ struct TestObject {
     counter: usize,
 }
 
-static MUTEX: OnceLock<BorrowMutex<16, TestObject>> = OnceLock::new();
-
 #[test]
 fn borrow_single_threaded() {
     std::env::set_var("SMOL_THREADS", "2");
 
-    MUTEX.set(BorrowMutex::new()).unwrap();
+    let mutex = BorrowMutex::<16, TestObject>::new();
 
-    let t1 = smol::spawn(async {
-        let mutex = MUTEX.get().unwrap();
+    let t1 = async {
         let mut test = TestObject { counter: 1 };
 
         loop {
@@ -50,13 +46,9 @@ fn borrow_single_threaded() {
         if let Some(lender) = mutex.lend(&mut test) {
             lender.await;
         };
-    });
+    };
 
-    //let t2_mutex = mutex.clone();
-    let t2 = smol::spawn(async {
-        let mutex = MUTEX.get().unwrap();
-        println!("t2_mutex: {mutex:?}");
-
+    let t2 = async {
         loop {
             let Some(test) = mutex.borrow_mut() else {
                 break;
@@ -67,10 +59,9 @@ fn borrow_single_threaded() {
             println!("t2: counter: {}", test.counter);
             Timer::after(Duration::from_millis(200)).await;
         }
-    });
+    };
 
-    smol::block_on(async {
-        t1.await;
-        t2.await;
+    futures::executor::block_on(async {
+        join!(t1, t2);
     });
 }
