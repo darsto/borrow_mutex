@@ -1,7 +1,7 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use core::future::Future;
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{Context, Poll};
 
 use futures::task::AtomicWaker;
 use futures::Stream;
@@ -22,8 +22,8 @@ pub struct AtomicWaiter {
 unsafe impl Sync for AtomicWaiter {}
 unsafe impl Send for AtomicWaiter {}
 
-impl std::fmt::Debug for AtomicWaiter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for AtomicWaiter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!(
             "AsyncCbStream {{ ready: {} }}",
             self.awoken.load(Ordering::Relaxed)

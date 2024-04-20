@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 
-use std::future::Future;
-use std::pin::Pin;
-use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::task::{Context, Poll};
+use core::future::Future;
+use core::pin::Pin;
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::task::{Context, Poll};
 
 use futures::Stream;
 
@@ -43,8 +43,8 @@ pub struct BorrowMutex<const MAX_BORROWERS: usize, T> {
 unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
 unsafe impl<const M: usize, T> Send for BorrowMutex<M, T> {}
 
-impl<const M: usize, T> std::fmt::Debug for BorrowMutex<M, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<const M: usize, T> core::fmt::Debug for BorrowMutex<M, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!(
             "BorrowMutex {{ available_for_borrow: {} }}",
             !self.inner_ref.load(Ordering::Relaxed).is_null()

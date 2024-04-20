@@ -4,9 +4,9 @@
 // Not all of the methods are used
 #![allow(dead_code)]
 
-use std::cell::UnsafeCell;
-use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct MPMC<const S: usize, T> {
     prod_head: AtomicUsize,
@@ -102,7 +102,7 @@ impl<const S: usize, T> MPMC<S, T> {
 
         // return a pointer to the enqueued element. the caller can dereference
         // this with unsafe if they know what they're doing
-        Ok(unsafe { std::mem::transmute(slot) })
+        Ok(unsafe { core::intrinsics::transmute(slot) })
     }
 
     pub fn pop(&self) -> Option<T> {
@@ -163,7 +163,7 @@ impl<const S: usize, T> MPMC<S, T> {
         }
 
         let slot = &self.ring[cons_tail & self.capacity()];
-        Some(unsafe { std::mem::transmute(slot) })
+        Some(unsafe { core::intrinsics::transmute(slot) })
     }
 }
 
@@ -173,8 +173,8 @@ impl<const S: usize, T> Default for MPMC<S, T> {
     }
 }
 
-impl<const S: usize, T> std::fmt::Debug for MPMC<S, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<const S: usize, T> core::fmt::Debug for MPMC<S, T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!(
             "MPMC {{ capacity: {capacity}, len: {len} }}",
             capacity = self.capacity(),
