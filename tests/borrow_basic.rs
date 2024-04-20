@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use borrow_mutex::BorrowMutex;
-use futures::{join, select, FutureExt};
+use futures::FutureExt;
 use smol::Timer;
 
 #[derive(Debug)]
@@ -14,8 +14,6 @@ struct TestObject {
 
 #[test]
 fn borrow_single_threaded() {
-    std::env::set_var("SMOL_THREADS", "2");
-
     let mutex = BorrowMutex::<16, TestObject>::new();
 
     let t1 = async {
@@ -29,7 +27,7 @@ fn borrow_single_threaded() {
             let mut timer = Timer::after(Duration::from_millis(200)).fuse();
             let mut lender = mutex.wait_for_borrow().fuse();
 
-            select! {
+            futures::select! {
                 _ = timer => {
                     if test.counter < 10 {
                         test.counter += 1;
@@ -62,6 +60,6 @@ fn borrow_single_threaded() {
     };
 
     futures::executor::block_on(async {
-        join!(t1, t2);
+        futures::join!(t1, t2);
     });
 }

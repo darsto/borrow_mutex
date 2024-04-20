@@ -29,10 +29,11 @@ use mpmc::MPMC;
 /// where internal mutability is an unnecessary complication, but the Mutex is
 /// Send+Sync and can be safely used from any number of threads.
 ///
-/// The API is fully safe, but it's not able to enforce all the semantics at
-/// compile time. I.e. if a lending side of a transaction drops the lending
-/// Future before it's resolved (before the borrowing side stops using it),
-/// the process will immediately abort.
+/// The API is fully safe and doesn't cause UB under any circumstances, but
+/// it's not able to enforce all the semantics at compile time. I.e. if a
+/// lending side of a transaction drops the lending Future before it's
+/// resolved (before the borrowing side stops using it), the process will
+/// immediately abort (...after printing an error message).
 pub struct BorrowMutex<const MAX_BORROWERS: usize, T> {
     inner_ref: AtomicPtr<T>,
     lend_waiter: AtomicWaiter,
@@ -66,7 +67,7 @@ pub struct BorrowMutexGuard<'g, const M: usize, T: 'g> {
 }
 
 // await until the reference is lended
-impl<'g, const M: usize, T: 'g,> Future for BorrowMutexGuard<'g, M, T> {
+impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuard<'g, M, T> {
     type Output = &'g mut T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -83,13 +84,12 @@ impl<'g, const M: usize, T: 'g,> Future for BorrowMutexGuard<'g, M, T> {
 
 impl<'m, const M: usize, T: 'm> Drop for BorrowMutexGuard<'m, M, T> {
     fn drop(&mut self) {
-        let mutex = unsafe { &*self.mutex};
+        let mutex = unsafe { &*self.mutex };
         self.inner.guard_present.store(false, Ordering::Release);
         // self.inner must be no longer accessed
 
         mutex.lend_waiter.wake();
     }
-
 }
 
 unsafe impl<'m, const M: usize, T: 'm> Sync for BorrowMutexGuard<'m, M, T> {}
@@ -259,5 +259,5 @@ impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
     }
 }
 
-unsafe impl<'l, const M: usize, T> Sync for BorrowMutexLendGuard<'l, M, T>  {}
+unsafe impl<'l, const M: usize, T> Sync for BorrowMutexLendGuard<'l, M, T> {}
 unsafe impl<'l, const M: usize, T> Send for BorrowMutexLendGuard<'l, M, T> {}
