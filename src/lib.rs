@@ -58,7 +58,6 @@ pub struct BorrowMutexRef<T> {
     inner_ref: AtomicPtr<T>,
     borrow_waiter: AtomicWaiter,
     guard_present: AtomicBool,
-    safe_to_drop: AtomicBool,
 }
 
 pub struct BorrowMutexGuard<'g, T: 'g> {
@@ -96,9 +95,11 @@ impl<'g, T> BorrowMutexGuard<'g, T> {
 
 impl<'m, T: 'm> Drop for BorrowMutexGuard<'m, T> {
     fn drop(&mut self) {
+        let mutex = unsafe { &*self.inner.mutex};
         self.inner.guard_present.store(false, Ordering::Release);
-        unsafe { &*self.inner.mutex}.lend_waiter.wake();
-        self.inner.safe_to_drop.store(true, Ordering::Release)
+        // self.inner must be no longer accessed
+
+        mutex.lend_waiter.wake();
     }
 
 }
@@ -127,13 +128,12 @@ impl<T> BorrowMutex<T> {
             inner_ref: AtomicPtr::new(null_mut()),
             borrow_waiter: AtomicWaiter::new(),
             guard_present: AtomicBool::new(true),
-            safe_to_drop: AtomicBool::new(false),
         }) else {
             // too many borrows
             return None;
         };
         // BorrowMutexGuard will turn ready when any LendGuard sees us, so
-        // awake it now if there is one
+        // awake any sleeping one if it exists
         self.lend_waiter.wake();
 
         Some(BorrowMutexGuard {
@@ -184,16 +184,20 @@ impl<T> Default for BorrowMutex<T> {
     }
 }
 
+pub struct BorrowMutexLender<'l, T> {
+    mutex: &'l BorrowMutex<T>,
+}
+
 // await until there is someone wanting to borrow
-impl<T> Future for BorrowMutex<T> {
+impl<'m, T> Future for BorrowMutexLender<'m, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lend_waiter.poll_const(cx) == Poll::Pending {
+        if self.mutex.lend_waiter.poll_const(cx) == Poll::Pending {
             return Poll::Pending;
         }
 
-        if self.borrowers.is_empty() {
+        if self.mutex.borrowers.is_empty() {
             // spurious awake
             return Poll::Pending;
         }
@@ -202,23 +206,10 @@ impl<T> Future for BorrowMutex<T> {
     }
 }
 
-impl<T> Stream for BorrowMutex<T> {
+impl<'m, T> Stream for BorrowMutexLender<'m, T> {
     type Item = ();
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.poll(cx).map(Some)
-    }
-}
-
-pub struct BorrowMutexLender<'l, T> {
-    mutex: &'l BorrowMutex<T>,
-}
-
-// await until someone's BorrowMutexGuard turns ready
-impl<'m, T> Future for BorrowMutexLender<'m, T> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.mutex.lend_waiter.poll_const(cx)
     }
 }
 
@@ -263,7 +254,7 @@ impl<'a, T: 'a> Drop for BorrowMutexLendGuard<'a, T> {
     fn drop(&mut self) {
         let mutex = unsafe { &*self.mutex };
 
-        if !self.borrow.safe_to_drop.load(Ordering::Acquire) {
+        if self.borrow.guard_present.load(Ordering::Acquire) {
             eprintln!("LendGuard dropped while the value is still borrowed");
             // the mutable reference is about to be re-gained in the lending context while
             // it's still used in the borrowed context. We can't let that happen, and we can't

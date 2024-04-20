@@ -40,6 +40,7 @@ impl<const S: usize, T> MPMC<S, T> {
     pub fn len(&self) -> usize {
         let prod_tail = self.prod_tail.load(Ordering::Acquire);
         let cons_tail = self.cons_tail.load(Ordering::Acquire);
+        //println!("len, prod_tail={prod_tail}, cons_tail={cons_tail}");
         // in case of intermediate update the calculated length won't ever be >= capacity
 
         (prod_tail - cons_tail) & self.capacity()
@@ -154,13 +155,14 @@ impl<const S: usize, T> MPMC<S, T> {
     }
 
     pub fn peek(&self) -> Option<&UnsafeCell<T>> {
-        let tail = self.prod_tail.load(Ordering::Acquire);
-        let head = self.cons_head.load(Ordering::Acquire);
-        if head == tail {
+        let prod_tail = self.prod_tail.load(Ordering::Acquire);
+        let cons_tail = self.cons_tail.load(Ordering::Acquire);
+        //println!("peek, prod_tail={prod_tail}, cons_tail={cons_tail}");
+        if prod_tail == cons_tail {
             return None;
         }
 
-        let slot = &self.ring[head & self.capacity()];
+        let slot = &self.ring[cons_tail & self.capacity()];
         Some(unsafe { std::mem::transmute(slot) })
     }
 }

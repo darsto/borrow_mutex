@@ -12,11 +12,11 @@ use futures::Stream;
 /// in the first subsequent poll() immediately return success.
 /// Every successfull poll() resets the "awoken" status.
 pub struct AtomicWaiter {
+    waker: AtomicWaker,
     /// The task was awoken since the last poll.
     /// This is useful to check if the task was awoken before anyone
     /// awaited it - in that case awaiting should return immediately
     awoken: AtomicBool,
-    waker: AtomicWaker,
 }
 
 unsafe impl Sync for AtomicWaiter {}
