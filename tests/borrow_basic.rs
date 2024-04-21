@@ -52,9 +52,11 @@ fn borrow_single_threaded() {
                 break;
             };
 
-            let test = test.await;
-            test.counter += 1;
-            println!("t2: counter: {}", test.counter);
+            {
+                let mut test = test.await;
+                test.counter += 1;
+                println!("t2: counter: {}", test.counter);
+            }
             Timer::after(Duration::from_millis(200)).await;
         }
     };

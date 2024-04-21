@@ -61,39 +61,72 @@ struct BorrowMutexRef {
     guard_present: AtomicBool,
 }
 
-pub struct BorrowMutexGuard<'g, const M: usize, T: 'g> {
-    mutex: *const BorrowMutex<M, T>,
+pub struct BorrowMutexGuardUnarmed<'g, const M: usize, T> {
+    mutex: AtomicPtr<BorrowMutex<M, T>>,
     inner: &'g BorrowMutexRef,
 }
 
 // await until the reference is lended
-impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuard<'g, M, T> {
-    type Output = &'g mut T;
+impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
+    type Output = BorrowMutexGuardArmed<'g, M, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.mutex.load(Ordering::Relaxed).is_null() {
+            return Poll::Pending;
+        }
+
         if self.inner.borrow_waiter.poll_const(cx) == Poll::Pending {
             return Poll::Pending;
         }
 
         // The borrow_waiter turns ready only when wake() is called,
-        // there are no spurious wakeups.
-        let inner_ref = unsafe { &*self.mutex }.inner_ref.load(Ordering::Acquire);
-        Poll::Ready(unsafe { &mut *inner_ref })
+        // there are no spurious wakeups, and this is the only ready
+        // poll we get.
+        let armed = BorrowMutexGuardArmed {
+            inner: BorrowMutexGuardUnarmed {
+                mutex: AtomicPtr::new(self.mutex.load(Ordering::Acquire)),
+                inner: self.inner,
+            },
+        };
+        self.mutex.store(null_mut(), Ordering::Relaxed);
+        Poll::Ready(armed)
     }
 }
 
-impl<'m, const M: usize, T: 'm> Drop for BorrowMutexGuard<'m, M, T> {
+impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
     fn drop(&mut self) {
-        let mutex = unsafe { &*self.mutex };
-        self.inner.guard_present.store(false, Ordering::Release);
-        // self.inner must be no longer accessed
-
-        mutex.lend_waiter.wake();
+        if !self.mutex.load(Ordering::Relaxed).is_null() {
+            let mutex = unsafe { &*self.mutex.load(Ordering::Relaxed) };
+            self.inner.guard_present.store(false, Ordering::Release);
+            // self.inner must be no longer accessed
+            mutex.lend_waiter.wake();
+        }
     }
 }
 
-unsafe impl<'m, const M: usize, T: 'm> Sync for BorrowMutexGuard<'m, M, T> {}
-unsafe impl<'m, const M: usize, T: 'm> Send for BorrowMutexGuard<'m, M, T> {}
+unsafe impl<'m, const M: usize, T> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
+unsafe impl<'m, const M: usize, T> Sync for BorrowMutexGuardUnarmed<'m, M, T> {}
+
+pub struct BorrowMutexGuardArmed<'g, const M: usize, T> {
+    inner: BorrowMutexGuardUnarmed<'g, M, T>,
+}
+
+impl<'g, const M: usize, T> core::ops::Deref for BorrowMutexGuardArmed<'g, M, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        let mutex = unsafe { &*self.inner.mutex.load(Ordering::Relaxed) };
+        let inner_ref = mutex.inner_ref.load(Ordering::Acquire);
+        unsafe { &mut *inner_ref }
+    }
+}
+
+impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let mutex = unsafe { &*self.inner.mutex.load(Ordering::Relaxed) };
+        let inner_ref = mutex.inner_ref.load(Ordering::Acquire);
+        unsafe { &mut *inner_ref }
+    }
+}
 
 impl<const M: usize, T> BorrowMutex<M, T> {
     pub fn new() -> Self {
@@ -105,7 +138,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         }
     }
 
-    pub fn borrow_mut<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuard<'g, M, T>> {
+    pub fn borrow_mut<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
         if self.terminated.load(Ordering::Acquire) {
             // TODO make this an error enum
             return None;
@@ -123,8 +156,8 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         // awake any sleeping one if it exists
         self.lend_waiter.wake();
 
-        Some(BorrowMutexGuard {
-            mutex: self,
+        Some(BorrowMutexGuardUnarmed {
+            mutex: AtomicPtr::new(self as *const _ as *mut BorrowMutex<M, T>),
             inner: unsafe { &*inner.get() },
         })
     }
@@ -181,15 +214,24 @@ impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // in general case we want to poll the lend_waiter, but it's awoken
+        // on both:
+        // - dropping the BorrowGuard
+        // - creating a new BorrowGuard
+        // And the same lend_waiter is polled in LendGuard, which could have
+        // consumed both of those wakes. Before we start endlessly polling now,
+        // check if we're ready
+        if !self.mutex.borrowers.is_empty() {
+            return Poll::Ready(());
+        }
+
         if self.mutex.lend_waiter.poll_const(cx) == Poll::Pending {
             return Poll::Pending;
         }
 
-        if self.mutex.borrowers.is_empty() {
-            // spurious awake
-            return Poll::Pending;
-        }
-
+        // even if dropped on the borrowing side, borrowers stay in the queue
+        // until us (the lender) pops them
+        assert!(!self.mutex.borrowers.is_empty());
         Poll::Ready(())
     }
 }
@@ -228,7 +270,8 @@ impl<'m, const M: usize, T> Future for BorrowMutexLendGuard<'m, M, T> {
         }
 
         if self.borrow.guard_present.load(Ordering::Acquire) {
-            // spurious awake
+            // lend_waiter could have been awoken due to a new BorrowGuard,
+            // but we're still pending
             return Poll::Pending;
         }
 
