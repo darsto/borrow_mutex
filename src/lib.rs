@@ -42,6 +42,84 @@ pub struct BorrowMutex<const MAX_BORROWERS: usize, T> {
 unsafe impl<const M: usize, T> Send for BorrowMutex<M, T> {}
 unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
 
+impl<const M: usize, T> BorrowMutex<M, T> {
+    pub fn new() -> Self {
+        Self {
+            inner_ref: AtomicPtr::new(null_mut()),
+            lend_waiter: AtomicWaiter::new(),
+            terminated: AtomicBool::new(false),
+            borrowers: MPMC::new(),
+        }
+    }
+
+    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
+        if self.terminated.load(Ordering::Acquire) {
+            // TODO make this an error enum
+            return None;
+        }
+
+        let Ok(inner) = self.borrowers.push(BorrowMutexRef {
+            borrow_waiter: AtomicWaiter::new(),
+            ref_acquired: AtomicBool::new(false),
+            guard_present: AtomicBool::new(true),
+        }) else {
+            // too many borrows
+            return None;
+        };
+        // BorrowMutexGuard will turn ready when any LendGuard sees us, so
+        // awake any sleeping one if it exists
+        self.lend_waiter.wake();
+
+        Some(BorrowMutexGuardUnarmed {
+            mutex: self,
+            inner: unsafe { &*inner.get() },
+            terminated: AtomicBool::new(false),
+        })
+    }
+
+    pub fn wait_for_borrow<'l, 'm: 'l>(&'m self) -> BorrowMutexLender<'l, M, T> {
+        BorrowMutexLender { mutex: self }
+    }
+
+    /// Lend a mutable reference to the first borrower (FIFO order).
+    /// This can be called even if there are no borrowers at the time (and will
+    /// immediately return None), but since it holds a mutable reference and
+    /// prevents its further use, it's recommended to first await the lender
+    /// ([`BorrowMutexLender`], obtained with [`Self::wait_for_borrow`]).
+    pub fn lend<'l, 'm: 'l>(&'m self, value: &'l mut T) -> Option<BorrowMutexLendGuard<'l, M, T>> {
+        let prev = self.inner_ref.swap(value, Ordering::AcqRel);
+        if !prev.is_null() {
+            eprintln!("multiple distinct references lended to a BorrowMutex");
+            // the previous inner_ref was replaced and only the newly lend-ed
+            // value can be borrowed from now on (on another thread), this won't
+            // cause any undefined behavior yet, but we can't reasonably proceed.
+            // Panicking here would be same as dropping the value while
+            // borrowed (see the destructor of [`BorrowMutexLendGuard`]), and we
+            // can't let that happen, so abort the entire process now.
+            std::process::abort();
+        }
+
+        let Some(borrow) = self.borrowers.peek() else {
+            return None;
+        };
+        let borrow = unsafe { &*borrow.get() };
+        Some(BorrowMutexLendGuard {
+            mutex: self,
+            borrow,
+        })
+    }
+
+    pub fn terminate(&self) {
+        self.terminated.store(true, Ordering::Release);
+    }
+}
+
+impl<const M: usize, T> Default for BorrowMutex<M, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const M: usize, T> core::fmt::Debug for BorrowMutex<M, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!(
@@ -126,84 +204,6 @@ impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M,
 
 /// An armed guard can be used to obtain multiple immutable references
 unsafe impl<'m, const M: usize, T> Sync for BorrowMutexGuardArmed<'m, M, T> {}
-
-impl<const M: usize, T> BorrowMutex<M, T> {
-    pub fn new() -> Self {
-        Self {
-            inner_ref: AtomicPtr::new(null_mut()),
-            lend_waiter: AtomicWaiter::new(),
-            terminated: AtomicBool::new(false),
-            borrowers: MPMC::new(),
-        }
-    }
-
-    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
-        if self.terminated.load(Ordering::Acquire) {
-            // TODO make this an error enum
-            return None;
-        }
-
-        let Ok(inner) = self.borrowers.push(BorrowMutexRef {
-            borrow_waiter: AtomicWaiter::new(),
-            ref_acquired: AtomicBool::new(false),
-            guard_present: AtomicBool::new(true),
-        }) else {
-            // too many borrows
-            return None;
-        };
-        // BorrowMutexGuard will turn ready when any LendGuard sees us, so
-        // awake any sleeping one if it exists
-        self.lend_waiter.wake();
-
-        Some(BorrowMutexGuardUnarmed {
-            mutex: self,
-            inner: unsafe { &*inner.get() },
-            terminated: AtomicBool::new(false),
-        })
-    }
-
-    pub fn wait_for_borrow<'l, 'm: 'l>(&'m self) -> BorrowMutexLender<'l, M, T> {
-        BorrowMutexLender { mutex: self }
-    }
-
-    /// Lend a mutable reference to the first borrower (FIFO order).
-    /// This can be called even if there are no borrowers at the time (and will
-    /// immediately return None), but since it holds a mutable reference and
-    /// prevents its further use, it's recommended to first await the lender
-    /// ([`BorrowMutexLender`], obtained with [`Self::wait_for_borrow`]).
-    pub fn lend<'l, 'm: 'l>(&'m self, value: &'l mut T) -> Option<BorrowMutexLendGuard<'l, M, T>> {
-        let prev = self.inner_ref.swap(value, Ordering::AcqRel);
-        if !prev.is_null() {
-            eprintln!("multiple distinct references lended to a BorrowMutex");
-            // the previous inner_ref was replaced and only the newly lend-ed
-            // value can be borrowed from now on (on another thread), this won't
-            // cause any undefined behavior yet, but we can't reasonably proceed.
-            // Panicking here would be same as dropping the value while
-            // borrowed (see the destructor of [`BorrowMutexLendGuard`]), and we
-            // can't let that happen, so abort the entire process now.
-            std::process::abort();
-        }
-
-        let Some(borrow) = self.borrowers.peek() else {
-            return None;
-        };
-        let borrow = unsafe { &*borrow.get() };
-        Some(BorrowMutexLendGuard {
-            mutex: self,
-            borrow,
-        })
-    }
-
-    pub fn terminate(&self) {
-        self.terminated.store(true, Ordering::Release);
-    }
-}
-
-impl<const M: usize, T> Default for BorrowMutex<M, T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 pub struct BorrowMutexLender<'l, const M: usize, T> {
     mutex: &'l BorrowMutex<M, T>,
