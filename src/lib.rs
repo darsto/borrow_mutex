@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
+#![doc = include_str!("../README.md")]
 
 use core::future::Future;
 use core::pin::Pin;
@@ -14,19 +15,19 @@ use atomic_waiter::AtomicWaiter;
 pub mod mpmc;
 use mpmc::MPMC;
 
-/// Async Mutex for `&mut T`. It does not require wrapping the target structure
-/// with the Mutex, only its mut reference.
+/// Async Mutex which does not require wrapping the target structure.
+/// Instead a &mut T can be lended to the mutex at any given timeslice.
 ///
-/// This lets others obtain this mutable reference. The data is borrow-able only
-/// while we await, and the borrowing itself is a future which doesn't resolve
-/// until we await. The semantics enforce that only one side has a mutable
-/// reference at any given time.
+/// This lets any other side borrow this &mut T. The data is borrow-able only
+/// while the lender awaits, and the lending side can await until someone wants
+/// to borrow. The semantics enforce at most one side has a mutable reference
+/// at any given time.
 ///
 /// This lets us share any mutable object between distinct async contexts
 /// without Arc<Mutex> over the object in question and without relying on any
 /// kind of internal mutability. It's mostly aimed at single-threaded executors
-/// where internal mutability is an unnecessary complication, but the Mutex is
-/// Send+Sync and can be safely used from any number of threads.
+/// where internal mutability is an unnecessary complication. Nevertheless,
+/// the Mutex is Send+Sync and can be safely used from any number of threads.
 ///
 /// The API is fully safe and doesn't cause UB under any circumstances, but
 /// it's not able to enforce all the semantics at compile time. I.e. if a
