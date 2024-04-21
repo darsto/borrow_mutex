@@ -14,7 +14,7 @@ struct TestObject {
 }
 
 #[test]
-fn borrow_single_threaded() {
+fn borrow_basic_single_thread() {
     let mutex = BorrowMutex::<16, TestObject>::new();
 
     let t1 = async {
