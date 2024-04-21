@@ -138,7 +138,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         }
     }
 
-    pub fn borrow_mut<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
+    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
         if self.terminated.load(Ordering::Acquire) {
             // TODO make this an error enum
             return None;

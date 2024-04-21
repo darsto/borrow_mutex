@@ -32,7 +32,6 @@ fn borrow_basic_double_thread() {
             }
 
             let mut timer = Timer::after(Duration::from_millis(100)).fuse();
-            let mut lender = t1_mutex.wait_for_borrow().fuse();
 
             futures::select! {
                 _ = timer => {
@@ -41,7 +40,7 @@ fn borrow_basic_double_thread() {
                     }
                     eprintln!("t1: counter: {}", test.counter);
                 }
-                _ = lender => {
+                _ = t1_mutex.wait_for_borrow().fuse() => {
                     t1_mutex.lend(&mut test).unwrap().await;
                 }
             }
@@ -58,7 +57,7 @@ fn borrow_basic_double_thread() {
         eprintln!("t2 thread: {:?}", std::thread::current());
 
         loop {
-            let Some(test) = t2_mutex.borrow_mut() else {
+            let Some(test) = t2_mutex.request_borrow() else {
                 break;
             };
 

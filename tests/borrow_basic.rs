@@ -26,7 +26,6 @@ fn borrow_basic_single_thread() {
             }
 
             let mut timer = Timer::after(Duration::from_millis(200)).fuse();
-            let mut lender = mutex.wait_for_borrow().fuse();
 
             futures::select! {
                 _ = timer => {
@@ -35,7 +34,7 @@ fn borrow_basic_single_thread() {
                     }
                     println!("t1: counter: {}", test.counter);
                 }
-                _ = lender => {
+                _ = mutex.wait_for_borrow().fuse() => {
                     mutex.lend(&mut test).unwrap().await
                 }
             }
@@ -49,7 +48,7 @@ fn borrow_basic_single_thread() {
 
     let t2 = async {
         loop {
-            let Some(test) = mutex.borrow_mut() else {
+            let Some(test) = mutex.request_borrow() else {
                 break;
             };
 
