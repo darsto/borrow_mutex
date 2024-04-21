@@ -3,9 +3,10 @@
 
 use std::time::Duration;
 
-use borrow_mutex::BorrowMutex;
 use futures::FutureExt;
 use smol::Timer;
+
+use borrow_mutex::BorrowMutex;
 
 #[derive(Debug)]
 struct TestObject {

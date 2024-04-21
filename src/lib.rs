@@ -265,17 +265,15 @@ impl<'m, const M: usize, T> Future for BorrowMutexLendGuard<'m, M, T> {
             }
         }
 
-        if mutex.lend_waiter.poll_const(cx) == Poll::Pending {
-            return Poll::Pending;
-        }
-
-        if self.borrow.guard_present.load(Ordering::Acquire) {
+        while mutex.lend_waiter.poll_const(cx) == Poll::Ready(()) {
             // lend_waiter could have been awoken due to a new BorrowGuard,
-            // but we're still pending
-            return Poll::Pending;
+            // but we're pending until our BorrowGuard is dropped
+            if !self.borrow.guard_present.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
         }
 
-        Poll::Ready(())
+        Poll::Pending
     }
 }
 
