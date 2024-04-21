@@ -34,7 +34,7 @@ fn borrow_basic_single_thread() {
                     }
                     println!("t1: counter: {}", test.counter);
                 }
-                _ = mutex.wait_for_borrow().fuse() => {
+                _ = mutex.wait_to_lend().fuse() => {
                     mutex.lend(&mut test).unwrap().await
                 }
             }

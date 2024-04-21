@@ -40,7 +40,7 @@ fn borrow_basic_double_thread() {
                     }
                     eprintln!("t1: counter: {}", test.counter);
                 }
-                _ = t1_mutex.wait_for_borrow().fuse() => {
+                _ = t1_mutex.wait_to_lend().fuse() => {
                     t1_mutex.lend(&mut test).unwrap().await;
                 }
             }

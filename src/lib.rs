@@ -77,7 +77,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         })
     }
 
-    pub fn wait_for_borrow<'l, 'm: 'l>(&'m self) -> BorrowMutexLender<'l, M, T> {
+    pub fn wait_to_lend<'l, 'm: 'l>(&'m self) -> BorrowMutexLender<'l, M, T> {
         BorrowMutexLender { mutex: self }
     }
 
@@ -85,7 +85,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
     /// This can be called even if there are no borrowers at the time (and will
     /// immediately return None), but since it holds a mutable reference and
     /// prevents its further use, it's recommended to first await the lender
-    /// ([`BorrowMutexLender`], obtained with [`Self::wait_for_borrow`]).
+    /// ([`BorrowMutexLender`], obtained with [`Self::wait_to_lend`]).
     pub fn lend<'l, 'm: 'l>(&'m self, value: &'l mut T) -> Option<BorrowMutexLendGuard<'l, M, T>> {
         let prev = self.inner_ref.swap(value, Ordering::AcqRel);
         if !prev.is_null() {
