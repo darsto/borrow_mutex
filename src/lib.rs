@@ -60,8 +60,9 @@ struct BorrowMutexRef {
 }
 
 pub struct BorrowMutexGuardUnarmed<'g, const M: usize, T> {
-    mutex: AtomicPtr<BorrowMutex<M, T>>,
+    mutex: &'g BorrowMutex<M, T>,
     inner: &'g BorrowMutexRef,
+    terminated: AtomicBool,
 }
 
 // await until the reference is lended
@@ -69,7 +70,7 @@ impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
     type Output = BorrowMutexGuardArmed<'g, M, T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.mutex.load(Ordering::Relaxed).is_null() {
+        if self.terminated.load(Ordering::Relaxed) {
             return Poll::Pending;
         }
 
@@ -82,22 +83,22 @@ impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
         // poll we get.
         let armed = BorrowMutexGuardArmed {
             inner: BorrowMutexGuardUnarmed {
-                mutex: AtomicPtr::new(self.mutex.load(Ordering::Acquire)),
+                mutex: self.mutex,
                 inner: self.inner,
+                terminated: AtomicBool::new(false),
             },
         };
-        self.mutex.store(null_mut(), Ordering::Relaxed);
+        self.terminated.store(true, Ordering::Relaxed);
         Poll::Ready(armed)
     }
 }
 
 impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
     fn drop(&mut self) {
-        if !self.mutex.load(Ordering::Relaxed).is_null() {
-            let mutex = unsafe { &*self.mutex.load(Ordering::Relaxed) };
+        if !self.terminated.load(Ordering::Relaxed) {
             self.inner.guard_present.store(false, Ordering::Release);
             // self.inner must be no longer accessed
-            mutex.lend_waiter.wake();
+            self.mutex.lend_waiter.wake();
         }
     }
 }
@@ -111,16 +112,14 @@ pub struct BorrowMutexGuardArmed<'g, const M: usize, T> {
 impl<'g, const M: usize, T> core::ops::Deref for BorrowMutexGuardArmed<'g, M, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        let mutex = unsafe { &*self.inner.mutex.load(Ordering::Relaxed) };
-        let inner_ref = mutex.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner.mutex.inner_ref.load(Ordering::Acquire);
         unsafe { &mut *inner_ref }
     }
 }
 
 impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        let mutex = unsafe { &*self.inner.mutex.load(Ordering::Relaxed) };
-        let inner_ref = mutex.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner.mutex.inner_ref.load(Ordering::Acquire);
         unsafe { &mut *inner_ref }
     }
 }
@@ -157,8 +156,9 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         self.lend_waiter.wake();
 
         Some(BorrowMutexGuardUnarmed {
-            mutex: AtomicPtr::new(self as *const _ as *mut BorrowMutex<M, T>),
+            mutex: self,
             inner: unsafe { &*inner.get() },
+            terminated: AtomicBool::new(false),
         })
     }
 
