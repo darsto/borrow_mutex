@@ -7,8 +7,6 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
 
-use futures::Stream;
-
 pub mod atomic_waiter;
 use atomic_waiter::AtomicWaiter;
 
@@ -221,25 +219,14 @@ impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
         // And the same lend_waiter is polled in LendGuard, which could have
         // consumed both of those wakes. Before we start endlessly polling now,
         // check if we're ready
-        if !self.mutex.borrowers.is_empty() {
-            return Poll::Ready(());
+        #[allow(clippy::collapsible_if)]
+        if self.mutex.borrowers.is_empty() {
+            if self.mutex.lend_waiter.poll_const(cx) == Poll::Pending {
+                return Poll::Pending;
+            }
         }
 
-        if self.mutex.lend_waiter.poll_const(cx) == Poll::Pending {
-            return Poll::Pending;
-        }
-
-        // even if dropped on the borrowing side, borrowers stay in the queue
-        // until us (the lender) pops them
-        assert!(!self.mutex.borrowers.is_empty());
         Poll::Ready(())
-    }
-}
-
-impl<'m, const M: usize, T> Stream for BorrowMutexLender<'m, M, T> {
-    type Item = ();
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll(cx).map(Some)
     }
 }
 

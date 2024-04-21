@@ -4,7 +4,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll};
 
 use futures::task::AtomicWaker;
-use futures::Stream;
 
 /// Thin wrapper over [`futures::task::AtomicWaker`]. This represents a
 /// Send + Sync Future that can be completed by calling its wake() method.
@@ -76,12 +75,5 @@ impl Future for AtomicWaiter {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.poll_const(cx)
-    }
-}
-
-impl Stream for AtomicWaiter {
-    type Item = ();
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll(cx).map(Some)
     }
 }
