@@ -39,8 +39,8 @@ pub struct BorrowMutex<const MAX_BORROWERS: usize, T> {
     borrowers: MPMC<MAX_BORROWERS, BorrowMutexRef>,
 }
 
-unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
 unsafe impl<const M: usize, T> Send for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
 
 impl<const M: usize, T> core::fmt::Debug for BorrowMutex<M, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -103,7 +103,6 @@ impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
 }
 
 unsafe impl<'m, const M: usize, T> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
-unsafe impl<'m, const M: usize, T> Sync for BorrowMutexGuardUnarmed<'m, M, T> {}
 
 pub struct BorrowMutexGuardArmed<'g, const M: usize, T> {
     inner: BorrowMutexGuardUnarmed<'g, M, T>,
@@ -125,6 +124,9 @@ impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M,
         unsafe { &mut *inner_ref }
     }
 }
+
+/// An armed guard can be used to obtain multiple immutable references
+unsafe impl<'m, const M: usize, T> Sync for BorrowMutexGuardArmed<'m, M, T> {}
 
 impl<const M: usize, T> BorrowMutex<M, T> {
     pub fn new() -> Self {
@@ -287,5 +289,4 @@ impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
     }
 }
 
-unsafe impl<'l, const M: usize, T> Sync for BorrowMutexLendGuard<'l, M, T> {}
 unsafe impl<'l, const M: usize, T> Send for BorrowMutexLendGuard<'l, M, T> {}
