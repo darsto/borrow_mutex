@@ -30,9 +30,7 @@ fn borrow_basic_double_thread() {
             if test.counter >= 20 {
                 break;
             }
-
             let mut timer = Timer::after(Duration::from_millis(100)).fuse();
-
             futures::select! {
                 _ = timer => {
                     if test.counter < 10 {
@@ -46,26 +44,17 @@ fn borrow_basic_double_thread() {
             }
         }
 
-        t1_mutex.terminate();
-        if let Some(lender) = t1_mutex.lend(&mut test) {
-            lender.await;
-        };
+        t1_mutex.terminate().await;
     });
 
     let t2_mutex = mutex.clone();
     let t2 = smol::spawn(async move {
         eprintln!("t2 thread: {:?}", std::thread::current());
 
-        loop {
-            let Some(test) = t2_mutex.request_borrow() else {
-                break;
-            };
-
-            {
-                let mut test = test.await;
-                test.counter += 1;
-                eprintln!("t2: counter: {}", test.counter);
-            }
+        while let Ok(mut test) = t2_mutex.request_borrow().await {
+            test.counter += 1;
+            eprintln!("t2: counter: {}", test.counter);
+            drop(test);
             Timer::after(Duration::from_millis(200)).await;
         }
     });

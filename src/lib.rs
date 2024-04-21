@@ -52,29 +52,12 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         }
     }
 
-    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> Option<BorrowMutexGuardUnarmed<'g, M, T>> {
-        if self.terminated.load(Ordering::Acquire) {
-            // TODO make this an error enum
-            return None;
-        }
-
-        let Ok(inner) = self.borrowers.push(BorrowMutexRef {
-            borrow_waiter: AtomicWaiter::new(),
-            ref_acquired: AtomicBool::new(false),
-            guard_present: AtomicBool::new(true),
-        }) else {
-            // too many borrows
-            return None;
-        };
-        // BorrowMutexGuard will turn ready when any LendGuard sees us, so
-        // awake any sleeping one if it exists
-        self.lend_waiter.wake();
-
-        Some(BorrowMutexGuardUnarmed {
+    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> BorrowMutexGuardUnarmed<'g, M, T> {
+        BorrowMutexGuardUnarmed {
             mutex: self,
-            inner: unsafe { &*inner.get() },
+            inner: AtomicPtr::new(null_mut()),
             terminated: AtomicBool::new(false),
-        })
+        }
     }
 
     pub fn wait_to_lend<'l, 'm: 'l>(&'m self) -> BorrowMutexLender<'l, M, T> {
@@ -102,6 +85,10 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         let Some(borrow) = self.borrowers.peek() else {
             return None;
         };
+        // SAFETY: The above check ensures that we're the only lend-er, and the
+        // object in MPMC is only de-queued and invalidated by the lender. There
+        // are no other mutable references to this object, so soundness properties
+        // are preserved.
         let borrow = unsafe { &*borrow.get() };
         Some(BorrowMutexLendGuard {
             mutex: self,
@@ -109,8 +96,30 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         })
     }
 
-    pub fn terminate(&self) {
-        self.terminated.store(true, Ordering::Release);
+    pub async fn terminate(&self) {
+        if self.terminated.swap(true, Ordering::AcqRel) {
+            // already terminated
+            return;
+        }
+
+        if !self.inner_ref.load(Ordering::Acquire).is_null() {
+            eprintln!("BorrowMutex terminated while a reference is lended");
+            // we can't gracefully proceed now, so abort the entire process
+            std::process::abort();
+        }
+
+        while let Some(borrow) = self.borrowers.peek() {
+            // SAFETY: we're the only "lend-er", and the object in MPMC will be
+            // de-queued and invalidated only by us. There are no other mutable
+            // references to this object, so soundness properties are preserved.
+            let borrow = unsafe { &*borrow.get() };
+            let lend_guard = BorrowMutexLendGuard {
+                mutex: self,
+                borrow,
+            };
+
+            lend_guard.await;
+        }
     }
 }
 
@@ -129,8 +138,12 @@ impl<const M: usize, T> core::fmt::Debug for BorrowMutex<M, T> {
     }
 }
 
-// TODO: This is currently 40bytes on x86_64, but could be 24bytes if we
-// organized the fields
+/// Common part between lend guard and borrow guard.
+/// This is kept inside the BorrowMutex MPMC until it can be safely
+/// dropped.
+///
+/// TODO: This is currently 40bytes on x86_64, but could be 24bytes if we
+/// organized the fields
 struct BorrowMutexRef {
     borrow_waiter: AtomicWaiter,
     ref_acquired: AtomicBool,
@@ -139,43 +152,85 @@ struct BorrowMutexRef {
 
 pub struct BorrowMutexGuardUnarmed<'g, const M: usize, T> {
     mutex: &'g BorrowMutex<M, T>,
-    inner: &'g BorrowMutexRef,
+    inner: AtomicPtr<BorrowMutexRef>,
     terminated: AtomicBool,
+}
+
+pub enum BorrowMutexError {
+    TooManyBorrows,
+    Terminated,
 }
 
 // await until the reference is lended
 impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
-    type Output = BorrowMutexGuardArmed<'g, M, T>;
+    type Output = Result<BorrowMutexGuardArmed<'g, M, T>, BorrowMutexError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.mutex.terminated.load(Ordering::Acquire) {
+            if self.inner.load(Ordering::Relaxed).is_null() {
+                // we haven't managed yet to register a real borrower, so
+                // no need to drop it in the Drop trait
+                self.terminated.store(true, Ordering::Relaxed)
+            }
+            return Poll::Ready(Err(BorrowMutexError::Terminated));
+        }
+
         if self.terminated.load(Ordering::Relaxed) {
+            return Poll::Ready(Err(BorrowMutexError::Terminated));
+        }
+
+        if self.inner.load(Ordering::Relaxed).is_null() {
+            // we're polled for the first time; try to register a real borrower
+            let Ok(inner) = self
+                .mutex
+                .borrowers //
+                .push(BorrowMutexRef {
+                    borrow_waiter: AtomicWaiter::new(),
+                    ref_acquired: AtomicBool::new(false),
+                    guard_present: AtomicBool::new(true),
+                })
+            else {
+                return Poll::Ready(Err(BorrowMutexError::TooManyBorrows));
+            };
+
+            // borrow guard will turn ready when any lend guard sees us, so
+            // try to awake any sleeping one
+            self.mutex.lend_waiter.wake();
+            self.inner.store(inner.get(), Ordering::Relaxed);
+        }
+
+        // SAFETY: The object is kept inside the BorrowMutex until the lend guard
+        // drops, which can only happen after this borrow guard is dropped. There
+        // are no other mutable references to this object, so soundness is preserved
+        let inner = unsafe { &*self.inner.load(Ordering::Relaxed) };
+        if inner.borrow_waiter.poll_const(cx) == Poll::Pending {
             return Poll::Pending;
         }
 
-        if self.inner.borrow_waiter.poll_const(cx) == Poll::Pending {
-            return Poll::Pending;
-        }
-
-        // The borrow_waiter turns ready only when wake() is called,
-        // there are no spurious wakeups, and this is the only ready
-        // poll we get.
-        let armed = BorrowMutexGuardArmed {
+        // The borrow_waiter turns ready only when wake() is called.
+        // There are no spurious wakeups, and this is the only ready poll we get.
+        self.terminated.store(true, Ordering::Relaxed);
+        Poll::Ready(Ok(BorrowMutexGuardArmed {
             inner: BorrowMutexGuardUnarmed {
                 mutex: self.mutex,
-                inner: self.inner,
+                inner: AtomicPtr::new(self.inner.load(Ordering::Relaxed)),
                 terminated: AtomicBool::new(false),
             },
-        };
-        self.terminated.store(true, Ordering::Relaxed);
-        Poll::Ready(armed)
+        }))
     }
 }
 
 impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
     fn drop(&mut self) {
         if !self.terminated.load(Ordering::Relaxed) {
-            self.inner.guard_present.store(false, Ordering::Release);
-            // self.inner must be no longer accessed
+            // SAFETY: The object is kept inside the BorrowMutex until the lend guard
+            // drops, which can only happen after guard_present is set to false, (which
+            // we're just about to do). There are no other mutable references to this
+            // object, so soundness is preserved
+            unsafe { &*self.inner.load(Ordering::Relaxed) }
+                .guard_present
+                .store(false, Ordering::Release);
+            // self.inner is no longer valid
             self.mutex.lend_waiter.wake();
         }
     }
@@ -271,7 +326,7 @@ impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
         let mutex = unsafe { &*self.mutex };
 
         if self.borrow.guard_present.load(Ordering::Acquire) {
-            eprintln!("LendGuard dropped while the value is still borrowed");
+            eprintln!("LendGuard dropped while the reference is still borrowed");
             // the mutable reference is about to be re-gained in the lending context while
             // it's still used in the borrowed context. We can't let that happen, and we can't
             // even panic here as this may invalidate the referenced object. If the borrow is

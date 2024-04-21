@@ -19,14 +19,11 @@ fn borrow_basic_single_thread() {
 
     let t1 = async {
         let mut test = TestObject { counter: 1 };
-
         loop {
             if test.counter >= 20 {
                 break;
             }
-
             let mut timer = Timer::after(Duration::from_millis(200)).fuse();
-
             futures::select! {
                 _ = timer => {
                     if test.counter < 10 {
@@ -40,23 +37,14 @@ fn borrow_basic_single_thread() {
             }
         }
 
-        mutex.terminate();
-        if let Some(lender) = mutex.lend(&mut test) {
-            lender.await;
-        };
+        mutex.terminate().await;
     };
 
     let t2 = async {
-        loop {
-            let Some(test) = mutex.request_borrow() else {
-                break;
-            };
-
-            {
-                let mut test = test.await;
-                test.counter += 1;
-                println!("t2: counter: {}", test.counter);
-            }
+        while let Ok(mut test) = mutex.request_borrow().await {
+            test.counter += 1;
+            println!("t2: counter: {}", test.counter);
+            drop(test);
             Timer::after(Duration::from_millis(200)).await;
         }
     };
