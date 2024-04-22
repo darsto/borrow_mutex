@@ -319,13 +319,14 @@ impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
         if !self.mutex.borrowers.is_empty() {
             return Poll::Ready(());
         }
-        if self.mutex.lend_waiter.poll_const(cx) == Poll::Pending {
-            return Poll::Pending;
+        // LendGuard could have turned Ready without ever polling, so
+        // also handle the spurious wakes here
+        while self.mutex.lend_waiter.poll_const(cx) == Poll::Ready(()) {
+            if !self.mutex.borrowers.is_empty() {
+                return Poll::Ready(());
+            }
         }
-        if self.mutex.borrowers.is_empty() {
-            return Poll::Pending;
-        }
-        Poll::Ready(())
+        Poll::Pending
     }
 }
 
