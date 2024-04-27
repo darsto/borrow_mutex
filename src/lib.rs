@@ -332,6 +332,13 @@ impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
     }
 }
 
+impl<'g, 'm: 'g, const M: usize, T> BorrowMutexLender<'m, M, T> {
+    /// Alias to [`BorrowMutex::lend`] with exact same semantics.
+    pub fn lend(&'m self, value: &'g mut T) -> Option<BorrowMutexLendGuard<'g, M, T>> {
+        self.mutex.lend(value)
+    }
+}
+
 /// TODO: doc
 pub struct BorrowMutexLendGuard<'l, const M: usize, T> {
     mutex: &'l BorrowMutex<M, T>,
