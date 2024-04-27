@@ -45,6 +45,8 @@ unsafe impl<const M: usize, T> Send for BorrowMutex<M, T> {}
 unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
 
 impl<const M: usize, T> BorrowMutex<M, T> {
+    pub const MAX_BORROWERS: usize = M;
+
     pub fn new() -> Self {
         Self {
             inner_ref: AtomicPtr::new(null_mut()),
