@@ -7,6 +7,7 @@ use core::pin::Pin;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
+use std::marker::PhantomPinned;
 
 use thiserror::Error;
 
@@ -108,6 +109,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
         Some(BorrowMutexLendGuard {
             mutex: self,
             borrow,
+            _marker: PhantomPinned,
         })
     }
 
@@ -133,6 +135,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
             let lend_guard = BorrowMutexLendGuard {
                 mutex: self,
                 borrow,
+                _marker: PhantomPinned,
             };
 
             // self.inner_ref remains null but our [`self.terminated`] shall
@@ -343,6 +346,10 @@ impl<'g, 'm: 'g, const M: usize, T> BorrowMutexLender<'m, M, T> {
 pub struct BorrowMutexLendGuard<'l, const M: usize, T> {
     mutex: &'l BorrowMutex<M, T>,
     borrow: &'l BorrowMutexRef,
+    /// Once polled, the LendGuard must have its Drop impl called, so
+    /// effectively forbid core::mem::forget() by making the guard !Unpin
+    /// See README.md "What if Drop is not called?"
+    _marker: PhantomPinned,
 }
 
 // await until the (first available) borrower acquires and then drops the BorrowMutexGuard
