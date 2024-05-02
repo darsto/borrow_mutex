@@ -86,6 +86,8 @@ impl<const M: usize, T> BorrowMutex<M, T> {
             std::process::abort();
         }
 
+        let borrow = self.borrowers.peek()?;
+
         let prev = self.inner_ref.swap(value, Ordering::AcqRel);
         if !prev.is_null() {
             eprintln!("multiple distinct references lended to a BorrowMutex");
@@ -98,9 +100,6 @@ impl<const M: usize, T> BorrowMutex<M, T> {
             std::process::abort();
         }
 
-        let Some(borrow) = self.borrowers.peek() else {
-            return None;
-        };
         // SAFETY: The above check ensures that we're the only lend-er, and the
         // object in MPMC is only de-queued and invalidated by the lender. There
         // are no other mutable references to this object, so soundness properties
