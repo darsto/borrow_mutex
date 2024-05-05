@@ -8,6 +8,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
 use std::marker::PhantomPinned;
+use std::mem::ManuallyDrop;
 
 use thiserror::Error;
 
@@ -272,6 +273,24 @@ pub struct BorrowMutexGuardArmed<'g, T> {
     inner_ref: AtomicPtr<T>,
     lend_waiter: &'g AtomicWaiter,
     inner: AtomicPtr<BorrowMutexRef>,
+}
+
+impl<'g, T> BorrowMutexGuardArmed<'g, T> {
+    /// Equivalent of the std::sync::MutexGuard::map() API which is currently
+    /// unstable. This makes a guard for a component of the borrowed data.
+    /// TODO: hide this behind a feature flag?
+    pub fn map<U, F>(orig: Self, f: F) -> BorrowMutexGuardArmed<'g, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let inner_ref = AtomicPtr::new(f(unsafe { &mut *orig.inner_ref.load(Ordering::Relaxed) }));
+        let orig = ManuallyDrop::new(orig);
+        BorrowMutexGuardArmed {
+            inner_ref,
+            lend_waiter: orig.lend_waiter,
+            inner: AtomicPtr::new(orig.inner.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl<'g, T> core::ops::Deref for BorrowMutexGuardArmed<'g, T> {
