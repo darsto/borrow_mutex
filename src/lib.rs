@@ -229,18 +229,20 @@ impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
         // SAFETY: The object is kept inside the BorrowMutex until the lend guard
         // drops, which can only happen after this borrow guard is dropped. There
         // are no other mutable references to this object, so soundness is preserved
-        let inner = unsafe { &*self.inner.load(Ordering::Relaxed) };
+        let inner = unsafe { &mut *self.inner.load(Ordering::Relaxed) };
         if inner.borrow_waiter.poll_const(cx) == Poll::Pending {
             return Poll::Pending;
         }
 
         // The borrow_waiter turns ready only when wake() is called.
         // There are no spurious wakeups, and this is the only ready poll we get.
+        let inner_ref = self.mutex.inner_ref.load(Ordering::Acquire);
+        assert!(!inner_ref.is_null());
         self.terminated.store(true, Ordering::Relaxed);
         Poll::Ready(Ok(BorrowMutexGuardArmed {
-            inner_ref: &self.mutex.inner_ref,
+            inner_ref: AtomicPtr::new(inner_ref),
             lend_waiter: &self.mutex.lend_waiter,
-            inner: AtomicPtr::new(self.inner.load(Ordering::Relaxed)),
+            inner: AtomicPtr::new(inner),
         }))
     }
 }
@@ -267,7 +269,7 @@ unsafe impl<'m, const M: usize, T> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
 
 /// TODO: doc
 pub struct BorrowMutexGuardArmed<'g, T> {
-    inner_ref: &'g AtomicPtr<T>,
+    inner_ref: AtomicPtr<T>,
     lend_waiter: &'g AtomicWaiter,
     inner: AtomicPtr<BorrowMutexRef>,
 }
