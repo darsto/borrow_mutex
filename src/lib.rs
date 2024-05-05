@@ -190,7 +190,7 @@ pub enum BorrowMutexError {
 
 // await until the reference is lended
 impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
-    type Output = Result<BorrowMutexGuardArmed<'g, M, T>, BorrowMutexError>;
+    type Output = Result<BorrowMutexGuardArmed<'g, T>, BorrowMutexError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.mutex.terminated.load(Ordering::Acquire) {
@@ -238,11 +238,9 @@ impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
         // There are no spurious wakeups, and this is the only ready poll we get.
         self.terminated.store(true, Ordering::Relaxed);
         Poll::Ready(Ok(BorrowMutexGuardArmed {
-            inner: BorrowMutexGuardUnarmed {
-                mutex: self.mutex,
-                inner: AtomicPtr::new(self.inner.load(Ordering::Relaxed)),
-                terminated: AtomicBool::new(false),
-            },
+            inner_ref: &self.mutex.inner_ref,
+            lend_waiter: &self.mutex.lend_waiter,
+            inner: AtomicPtr::new(self.inner.load(Ordering::Relaxed)),
         }))
     }
 }
@@ -268,14 +266,16 @@ impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
 unsafe impl<'m, const M: usize, T> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
 
 /// TODO: doc
-pub struct BorrowMutexGuardArmed<'g, const M: usize, T> {
-    inner: BorrowMutexGuardUnarmed<'g, M, T>,
+pub struct BorrowMutexGuardArmed<'g, T> {
+    inner_ref: &'g AtomicPtr<T>,
+    lend_waiter: &'g AtomicWaiter,
+    inner: AtomicPtr<BorrowMutexRef>,
 }
 
-impl<'g, const M: usize, T> core::ops::Deref for BorrowMutexGuardArmed<'g, M, T> {
+impl<'g, T> core::ops::Deref for BorrowMutexGuardArmed<'g, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        let inner_ref = self.inner.mutex.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner_ref.load(Ordering::Acquire);
         // SAFETY: The mutable reference was captured via [`Self::lend()`] which
         // effectively doesn't return until the lend guard is dropped, which doesn't
         // happen until this borrow guard is dropped.
@@ -285,15 +285,29 @@ impl<'g, const M: usize, T> core::ops::Deref for BorrowMutexGuardArmed<'g, M, T>
     }
 }
 
-impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M, T> {
+impl<'g, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        let inner_ref = self.inner.mutex.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner_ref.load(Ordering::Acquire);
         // SAFETY: The mutable reference was captured via [`Self::lend()`] which
         // effectively doesn't return until the lend guard is dropped, which doesn't
         // happen until this borrow guard is dropped.
         // If the lending future is dropped without awaiting the whole process will
         // abort - before any undefined behavior creeps in.
         unsafe { &mut *inner_ref }
+    }
+}
+
+impl<'m, T> Drop for BorrowMutexGuardArmed<'m, T> {
+    fn drop(&mut self) {
+        // SAFETY: The object is kept inside the BorrowMutex until the lend guard
+        // drops, which can only happen after guard_present is set to false, (which
+        // we're just about to do). There are no other mutable references to this
+        // object, so soundness is preserved
+        unsafe { &*self.inner.load(Ordering::Relaxed) }
+            .guard_present
+            .store(false, Ordering::Release);
+        // self.inner is no longer valid
+        self.lend_waiter.wake();
     }
 }
 
@@ -301,7 +315,7 @@ impl<'g, const M: usize, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, M,
 /// some sense to impl Sync.
 /// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
 /// of only atomics.
-unsafe impl<'m, const M: usize, T> Sync for BorrowMutexGuardArmed<'m, M, T> {}
+unsafe impl<'m, T> Sync for BorrowMutexGuardArmed<'m, T> {}
 
 /// TODO: doc
 pub struct BorrowMutexLender<'l, const M: usize, T> {
