@@ -16,6 +16,8 @@ pub mod atomic_waiter;
 use atomic_waiter::AtomicWaiter;
 pub mod mpmc;
 use mpmc::MPMC;
+pub mod atomic_fat_ptr;
+use atomic_fat_ptr::AtomicFatPtr;
 
 /// Async Mutex which does not require wrapping the target structure.
 /// Instead a &mut T can be lended to the mutex at any given timeslice.
@@ -36,22 +38,22 @@ use mpmc::MPMC;
 /// lending side of a transaction drops the lending Future before it's
 /// resolved (before the borrowing side stops using it), the process will
 /// immediately abort (...after printing an error message).
-pub struct BorrowMutex<const MAX_BORROWERS: usize, T> {
-    inner_ref: AtomicPtr<T>,
+pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
+    inner_ref: AtomicFatPtr<T>,
     lend_waiter: AtomicWaiter,
     terminated: AtomicBool,
     borrowers: MPMC<MAX_BORROWERS, BorrowMutexRef>,
 }
 
-unsafe impl<const M: usize, T> Send for BorrowMutex<M, T> {}
-unsafe impl<const M: usize, T> Sync for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T: ?Sized> Send for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T: ?Sized> Sync for BorrowMutex<M, T> {}
 
-impl<const M: usize, T> BorrowMutex<M, T> {
+impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     pub const MAX_BORROWERS: usize = M;
 
     pub fn new() -> Self {
         Self {
-            inner_ref: AtomicPtr::new(null_mut()),
+            inner_ref: AtomicFatPtr::new(None),
             lend_waiter: AtomicWaiter::new(),
             terminated: AtomicBool::new(false),
             borrowers: MPMC::new(),
@@ -89,8 +91,8 @@ impl<const M: usize, T> BorrowMutex<M, T> {
 
         let borrow = self.borrowers.peek()?;
 
-        let prev = self.inner_ref.swap(value, Ordering::AcqRel);
-        if !prev.is_null() {
+        let prev = self.inner_ref.swap(Some(value), Ordering::AcqRel);
+        if prev.is_some() {
             eprintln!("multiple distinct references lended to a BorrowMutex");
             // the previous inner_ref was replaced and only the newly lend-ed
             // value can be borrowed from now on (on another thread), this won't
@@ -121,7 +123,7 @@ impl<const M: usize, T> BorrowMutex<M, T> {
             return;
         }
 
-        if !self.inner_ref.load(Ordering::Acquire).is_null() {
+        if self.inner_ref.load(Ordering::Acquire).is_some() {
             eprintln!("BorrowMutex terminated while a reference is lended");
             // we can't gracefully proceed now, so abort the entire process
             std::process::abort();
@@ -146,17 +148,17 @@ impl<const M: usize, T> BorrowMutex<M, T> {
     }
 }
 
-impl<const M: usize, T> Default for BorrowMutex<M, T> {
+impl<const M: usize, T: ?Sized> Default for BorrowMutex<M, T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const M: usize, T> core::fmt::Debug for BorrowMutex<M, T> {
+impl<const M: usize, T: ?Sized> core::fmt::Debug for BorrowMutex<M, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_fmt(format_args!(
             "BorrowMutex {{ available_for_borrow: {} }}",
-            !self.inner_ref.load(Ordering::Relaxed).is_null()
+            self.inner_ref.load(Ordering::Relaxed).is_some()
         ))
     }
 }
@@ -174,7 +176,7 @@ struct BorrowMutexRef {
 }
 
 /// TODO: doc
-pub struct BorrowMutexGuardUnarmed<'g, const M: usize, T> {
+pub struct BorrowMutexGuardUnarmed<'g, const M: usize, T: ?Sized> {
     mutex: &'g BorrowMutex<M, T>,
     inner: AtomicPtr<BorrowMutexRef>,
     terminated: AtomicBool,
@@ -190,7 +192,7 @@ pub enum BorrowMutexError {
 }
 
 // await until the reference is lended
-impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
+impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowMutexGuardUnarmed<'g, M, T> {
     type Output = Result<BorrowMutexGuardArmed<'g, T>, BorrowMutexError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -238,17 +240,17 @@ impl<'g, const M: usize, T: 'g> Future for BorrowMutexGuardUnarmed<'g, M, T> {
         // The borrow_waiter turns ready only when wake() is called.
         // There are no spurious wakeups, and this is the only ready poll we get.
         let inner_ref = self.mutex.inner_ref.load(Ordering::Acquire);
-        assert!(!inner_ref.is_null());
+        assert!(inner_ref.is_some());
         self.terminated.store(true, Ordering::Relaxed);
         Poll::Ready(Ok(BorrowMutexGuardArmed {
-            inner_ref: AtomicPtr::new(inner_ref),
+            inner_ref: AtomicFatPtr::new(inner_ref),
             lend_waiter: &self.mutex.lend_waiter,
             inner: AtomicPtr::new(inner),
         }))
     }
 }
 
-impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
+impl<'m, const M: usize, T: ?Sized> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
     fn drop(&mut self) {
         if !self.terminated.load(Ordering::Relaxed) {
             // SAFETY: The object is kept inside the BorrowMutex until the lend guard
@@ -266,16 +268,16 @@ impl<'m, const M: usize, T> Drop for BorrowMutexGuardUnarmed<'m, M, T> {
 
 /// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
 /// of only atomics.
-unsafe impl<'m, const M: usize, T> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
+unsafe impl<'m, const M: usize, T: ?Sized> Send for BorrowMutexGuardUnarmed<'m, M, T> {}
 
 /// TODO: doc
-pub struct BorrowMutexGuardArmed<'g, T> {
-    inner_ref: AtomicPtr<T>,
+pub struct BorrowMutexGuardArmed<'g, T: ?Sized> {
+    inner_ref: AtomicFatPtr<T>,
     lend_waiter: &'g AtomicWaiter,
     inner: AtomicPtr<BorrowMutexRef>,
 }
 
-impl<'g, T> BorrowMutexGuardArmed<'g, T> {
+impl<'g, T: ?Sized> BorrowMutexGuardArmed<'g, T> {
     /// Equivalent of the std::sync::MutexGuard::map() API which is currently
     /// unstable. This makes a guard for a component of the borrowed data.
     /// TODO: hide this behind a feature flag?
@@ -283,7 +285,8 @@ impl<'g, T> BorrowMutexGuardArmed<'g, T> {
     where
         F: FnOnce(&mut T) -> &mut U,
     {
-        let inner_ref = AtomicPtr::new(f(unsafe { &mut *orig.inner_ref.load(Ordering::Relaxed) }));
+        let inner_ref = orig.inner_ref.load(Ordering::Relaxed).unwrap();
+        let inner_ref = AtomicFatPtr::new(Some(f(unsafe { &mut *inner_ref })));
         let orig = ManuallyDrop::new(orig);
         BorrowMutexGuardArmed {
             inner_ref,
@@ -293,10 +296,10 @@ impl<'g, T> BorrowMutexGuardArmed<'g, T> {
     }
 }
 
-impl<'g, T> core::ops::Deref for BorrowMutexGuardArmed<'g, T> {
+impl<'g, T: ?Sized> core::ops::Deref for BorrowMutexGuardArmed<'g, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        let inner_ref = self.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner_ref.load(Ordering::Acquire).unwrap();
         // SAFETY: The mutable reference was captured via [`Self::lend()`] which
         // effectively doesn't return until the lend guard is dropped, which doesn't
         // happen until this borrow guard is dropped.
@@ -306,9 +309,9 @@ impl<'g, T> core::ops::Deref for BorrowMutexGuardArmed<'g, T> {
     }
 }
 
-impl<'g, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, T> {
+impl<'g, T: ?Sized> core::ops::DerefMut for BorrowMutexGuardArmed<'g, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        let inner_ref = self.inner_ref.load(Ordering::Acquire);
+        let inner_ref = self.inner_ref.load(Ordering::Acquire).unwrap();
         // SAFETY: The mutable reference was captured via [`Self::lend()`] which
         // effectively doesn't return until the lend guard is dropped, which doesn't
         // happen until this borrow guard is dropped.
@@ -318,7 +321,7 @@ impl<'g, T> core::ops::DerefMut for BorrowMutexGuardArmed<'g, T> {
     }
 }
 
-impl<'m, T> Drop for BorrowMutexGuardArmed<'m, T> {
+impl<'m, T: ?Sized> Drop for BorrowMutexGuardArmed<'m, T> {
     fn drop(&mut self) {
         // SAFETY: The object is kept inside the BorrowMutex until the lend guard
         // drops, which can only happen after guard_present is set to false, (which
@@ -336,15 +339,15 @@ impl<'m, T> Drop for BorrowMutexGuardArmed<'m, T> {
 /// some sense to impl Sync.
 /// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
 /// of only atomics.
-unsafe impl<'m, T> Sync for BorrowMutexGuardArmed<'m, T> {}
+unsafe impl<'m, T: ?Sized> Sync for BorrowMutexGuardArmed<'m, T> {}
 
 /// TODO: doc
-pub struct BorrowMutexLender<'l, const M: usize, T> {
+pub struct BorrowMutexLender<'l, const M: usize, T: ?Sized> {
     mutex: &'l BorrowMutex<M, T>,
 }
 
 // await until there is someone wanting to borrow
-impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
+impl<'m, const M: usize, T: ?Sized> Future for BorrowMutexLender<'m, M, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -369,7 +372,7 @@ impl<'m, const M: usize, T> Future for BorrowMutexLender<'m, M, T> {
     }
 }
 
-impl<'g, 'm: 'g, const M: usize, T> BorrowMutexLender<'m, M, T> {
+impl<'g, 'm: 'g, const M: usize, T: ?Sized> BorrowMutexLender<'m, M, T> {
     /// Alias to [`BorrowMutex::lend`] with exact same semantics.
     pub fn lend(&'m self, value: &'g mut T) -> Option<BorrowMutexLendGuard<'g, M, T>> {
         self.mutex.lend(value)
@@ -377,7 +380,7 @@ impl<'g, 'm: 'g, const M: usize, T> BorrowMutexLender<'m, M, T> {
 }
 
 /// TODO: doc
-pub struct BorrowMutexLendGuard<'l, const M: usize, T> {
+pub struct BorrowMutexLendGuard<'l, const M: usize, T: ?Sized> {
     mutex: &'l BorrowMutex<M, T>,
     borrow: &'l BorrowMutexRef,
     /// Once polled, the LendGuard must have its Drop impl called, so
@@ -387,7 +390,7 @@ pub struct BorrowMutexLendGuard<'l, const M: usize, T> {
 }
 
 // await until the (first available) borrower acquires and then drops the BorrowMutexGuard
-impl<'m, const M: usize, T> Future for BorrowMutexLendGuard<'m, M, T> {
+impl<'m, const M: usize, T: ?Sized> Future for BorrowMutexLendGuard<'m, M, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -414,7 +417,7 @@ impl<'m, const M: usize, T> Future for BorrowMutexLendGuard<'m, M, T> {
     }
 }
 
-impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
+impl<'l, const M: usize, T: ?Sized> Drop for BorrowMutexLendGuard<'l, M, T> {
     fn drop(&mut self) {
         if self.borrow.guard_present.load(Ordering::Acquire) {
             eprintln!("LendGuard dropped while the reference is still borrowed");
@@ -426,7 +429,7 @@ impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
             std::process::abort();
         }
         assert!(self.borrow.ref_acquired.load(Ordering::Acquire));
-        self.mutex.inner_ref.store(null_mut(), Ordering::Release);
+        self.mutex.inner_ref.store(None, Ordering::Release);
 
         let _ = self.mutex.borrowers.pop().unwrap();
         // self.borrow should be no longer accessed (it's still valid memory, noone
@@ -437,4 +440,4 @@ impl<'l, const M: usize, T> Drop for BorrowMutexLendGuard<'l, M, T> {
 
 /// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
 /// of only atomics.
-unsafe impl<'l, const M: usize, T> Send for BorrowMutexLendGuard<'l, M, T> {}
+unsafe impl<'l, const M: usize, T: ?Sized> Send for BorrowMutexLendGuard<'l, M, T> {}
