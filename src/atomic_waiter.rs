@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright(c) 2024 Darek Stojaczyk
+
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
