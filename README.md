@@ -3,29 +3,33 @@
 **Very initial version!** Use with caution
 
 Async Mutex which does not require wrapping the target structure.
-Instead a &mut T can be lended to the mutex at any given timeslice.
+Instead, a &mut T can be lended to the mutex at any given time.
 
-This lets any other side borrow this &mut T. The data is borrow-able only
+This lets any other side borrow the &mut T. The  is borrow-able only
 while the lender awaits, and the lending side can await until someone wants
 to borrow. The semantics enforce at most one side has a mutable reference
 at any given time.
 
 This lets us share any mutable object between distinct async contexts
-without Arc<Mutex> over the object in question and without relying on any
-kind of internal mutability. It's mostly aimed at single-threaded executors
-where internal mutability is an unnecessary complication. Nevertheless,
-the Mutex is Send+Sync and can be safely used from any number of threads.
+without [`Arc`]<[`Mutex`]> over the object in question and without relying
+on any kind of internal mutability. It's mostly aimed at single-threaded
+executors where internal mutability is an unnecessary complication.
+Nevertheless, the Mutex is Send+Sync and can be safely used from any number
+of threads.
 
-Since the shared data doesn't have to be wrapped inside an Arc<Mutex>, it
-doesn't have to be allocated on the heap. In fact, BorrowMutex does not
-perform any allocations whatsoever. The `tests/borrow_basic.rs` presents a
-simple example where *everything* is stored on the stack.
+Since the shared data doesn't have to be wrapped inside an [`Arc`],
+it doesn't have to be allocated on the heap. In fact, BorrowMutex does not
+perform any allocations whatsoever. The
+[`tests/borrow_basic.rs`](https://github.com/darsto/borrow_mutex/blob/master/tests/borrow_basic.rs)
+presents a simple example where *everything* is stored on the stack.
 
 The API is fully safe and doesn't cause UB under any circumstances, but
 it's not able to enforce all the semantics at compile time. I.e. if a
 lending side of a transaction drops the lending Future before it's
 resolved (before the borrowing side stops using it), the process will
 immediately abort (...after printing an error message).
+
+The mutex is also sound with any [`core::mem::forget()`].
 
 ## Example
 
@@ -99,30 +103,35 @@ a full working example.
 It should be. I was not able to trigger any undefined behavior with
 safe code.
 
-The object returned from `mutex.lend(& mut value)` (LendGuard) has a Drop impl
-that must be called before the &mut value can be usable again. If the reference
-is still borrowed on the borrower side, the program immediately aborts (panic
-is not sufficient). But what about std::mem::forget? The Guard could be
-technically forgotten, and the &mut reference could be reused on the lender
-side while it's still used on the borrower side. That would be unsound, and
-cause immediate undefined behavior. Similar Rust libraries make their API unsafe
-exactly because of this reason - it's the caller's responsibility to not call
-mem::forget() or similar
+The object returned from [`BorrowMutex::lend()`] (that is [`BorrowMutexLendGuard`])
+has a Drop impl that must be called before the &mut value can be usable again.
+If the reference is still borrowed on the borrower side, the program immediately
+aborts (panic is not sufficient). But what about [`core::mem::forget()`]? The
+Guard could be technically forgotten, and the &mut reference could be reused on
+the lender side while it's still used on the borrowstd::sync::er side. That
+would be unsound, and cause immediate undefined behavior. Similar Rust libraries
+make their API unsafe exactly because of this reason - it's the caller's
+responsibility to not call [`core::mem::forget()`] or similar
 ([async-scoped](https://docs.rs/async-scoped/0.9.0/async_scoped/struct.Scope.html#method.scope))
 
-BorrowMutex doesn't have any unsafe APIs. mem::forget() can be called on the
-LendGuard and is perfectly sound. That's because the borrower doesn't obtain the
-&mut reference until the LendGuard is polled. We have two scenarios:
-- With LendGuard dropped without ever polling the BorrowMutex is hardly usable
-and will abort on the next `mutex.lend()` call (multiple lended values), but no
+[`BorrowMutex`] doesn't have any unsafe APIs. [`core::mem::forget()`] can be
+called on the [`BorrowMutexLendGuard`] and is perfectly sound. That's because
+the borrower doesn't obtain the &mut reference until the [`BorrowMutexLendGuard`]
+is polled. We have two scenarios:
+- With [`BorrowMutexLendGuard`] dropped without ever polling it, the [`BorrowMutex`] is
+hardly usable and will abort on the next [`BorrowMutex::lend()`] call (multiple lended
+values), but no
 undefined behavior can be observed.
 - To poll the Guard once and drop it later it needs to be manually pinned first.
 This can be implicitly via .await (which also polls to completion/cancellation, so
-is out of this consideration) or explicitly pinned with `pin!()`.
-The `Pin<&mut LendGuard>` can be forgotten this way - but this still Drops the
+is out of this consideration) or explicitly pinned with [`core::pin::pin!()`].
+The [`core::pin::Pin<&mut BorrowMutexLendGuard>`] can be forgotten this way - but this still Drops the
 original LendGuard and there's no way to prevent that with only safe code.
 The LendGuard is !Unpin exactly for this reason.
 
 To expand on that second case, see a similar discussion at
-https://github.com/imxrt-rs/imxrt-hal/issues/137 and a
+<https://github.com/imxrt-rs/imxrt-hal/issues/137> and a
 [code snippet linked inside](https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=79e34e7c3e968f8f6680a7cd08d1ffc4)
+
+[`Arc`]: std::sync::Arc
+[`Mutex`]: std::sync::Mutex

@@ -19,7 +19,7 @@ pub mod mpmc;
 use mpmc::MPMC;
 
 /// Async Mutex which does not require wrapping the target structure.
-/// Instead a &mut T can be lended to the mutex at any given timeslice.
+/// A `&mut T` can be lended to the mutex at any given time.
 ///
 /// This lets any other side borrow this &mut T. The data is borrow-able only
 /// while the lender awaits, and the lending side can await until someone wants
@@ -27,7 +27,7 @@ use mpmc::MPMC;
 /// at any given time.
 ///
 /// This lets us share any mutable object between distinct async contexts
-/// without Arc<Mutex> over the object in question and without relying on any
+/// without `Arc<Mutex>` over the object in question and without relying on any
 /// kind of internal mutability. It's mostly aimed at single-threaded executors
 /// where internal mutability is an unnecessary complication. Nevertheless,
 /// the Mutex is Send+Sync and can be safely used from any number of threads.
