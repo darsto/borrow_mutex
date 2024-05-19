@@ -48,10 +48,13 @@ fn mpmc_spam() {
                     };
 
                     for _ in 0..num_iters {
-                        if let Ok(_) = mpmc.push(SpamObject {
-                            push_counter: AtomicUsize::new(1),
-                            pop_counter: AtomicUsize::new(0),
-                        }) {
+                        if mpmc
+                            .push(SpamObject {
+                                push_counter: AtomicUsize::new(1),
+                                pop_counter: AtomicUsize::new(0),
+                            })
+                            .is_ok()
+                        {
                             thread_state.push_counter += 1;
                         }
 
