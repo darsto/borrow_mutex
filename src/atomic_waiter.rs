@@ -34,7 +34,7 @@ impl core::fmt::Debug for AtomicWaiter {
 }
 
 impl AtomicWaiter {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             awoken: AtomicBool::new(false),
             waker: AtomicWaker::new(),

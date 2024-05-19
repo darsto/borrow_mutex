@@ -2,10 +2,10 @@
 
 **Very initial version!** Use with caution
 
-Async Mutex which does not require wrapping the target structure.
-Instead, a &mut T can be lended to the mutex at any given time.
+[`BorrowMutex`] is an async Mutex which does not require wrapping the target
+structure. Instead, a `&mut T` can be lended to the mutex at any given time.
 
-This lets any other side borrow the &mut T. The  is borrow-able only
+This lets any other side borrow the `&mut T`. The  is borrow-able only
 while the lender awaits, and the lending side can await until someone wants
 to borrow. The semantics enforce at most one side has a mutable reference
 at any given time.
@@ -14,8 +14,8 @@ This lets us share any mutable object between distinct async contexts
 without [`Arc`]<[`Mutex`]> over the object in question and without relying
 on any kind of internal mutability. It's mostly aimed at single-threaded
 executors where internal mutability is an unnecessary complication.
-Nevertheless, the Mutex is Send+Sync and can be safely used from any number
-of threads.
+Still, the [`BorrowMutex`] is Send+Sync and can be safely used from
+any number of threads.
 
 Since the shared data doesn't have to be wrapped inside an [`Arc`],
 it doesn't have to be allocated on the heap. In fact, BorrowMutex does not
@@ -27,7 +27,7 @@ The API is fully safe and doesn't cause UB under any circumstances, but
 it's not able to enforce all the semantics at compile time. I.e. if a
 lending side of a transaction drops the lending Future before it's
 resolved (before the borrowing side stops using it), the process will
-immediately abort (...after printing an error message).
+immediately abort (and print an error message).
 
 The mutex is also sound with any [`core::mem::forget()`].
 
@@ -119,15 +119,14 @@ called on the [`LendGuard`] and is perfectly sound. That's because
 the borrower doesn't obtain the &mut reference until the [`LendGuard`]
 is polled. We have two scenarios:
 - With [`LendGuard`] dropped without ever polling it, the [`BorrowMutex`] is
-hardly usable and will abort on the next [`BorrowMutex::lend()`] call (multiple lended
-values), but no
-undefined behavior can be observed.
+hardly usable and will abort on the next [`BorrowMutex::lend()`] call
+(multiple lended values), but no undefined behavior can be observed.
 - To poll the Guard once and drop it later it needs to be manually pinned first.
-This can be implicitly via .await (which also polls to completion/cancellation, so
-is out of this consideration) or explicitly pinned with [`core::pin::pin!()`].
-The [`core::pin::Pin<&mut LendGuard>`] can be forgotten this way - but this still Drops the
-original LendGuard and there's no way to prevent that with only safe code.
-The LendGuard is !Unpin exactly for this reason.
+This can be implicitly via .await (which also polls to completion/cancellation,
+so is out of this consideration) or explicitly pinned with [`core::pin::pin!()`].
+The [`core::pin::Pin<&mut LendGuard>`] can be forgotten this way - but this
+still Drops the original LendGuard and there's no way to prevent that with
+only safe code. The [`LendGuard`] is !Unpin exactly for this reason.
 
 To expand on that second case, see a similar discussion at
 <https://github.com/imxrt-rs/imxrt-hal/issues/137> and a

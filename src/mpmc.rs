@@ -17,7 +17,7 @@ pub struct MPMC<const S: usize, T> {
 }
 
 impl<const S: usize, T> MPMC<S, T> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         if !S.is_power_of_two() || S < 2 {
             panic!("size must be a power of 2 (and be greater or equal 2)");
         }

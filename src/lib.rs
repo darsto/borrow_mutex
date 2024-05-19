@@ -13,30 +13,30 @@ use std::mem::ManuallyDrop;
 
 use thiserror::Error;
 
+#[doc(hidden)]
 pub mod atomic_waiter;
 use atomic_waiter::AtomicWaiter;
+#[doc(hidden)]
 pub mod mpmc;
 use mpmc::MPMC;
 
 /// Async Mutex which does not require wrapping the target structure.
 /// A `&mut T` can be lended to the mutex at any given time.
 ///
-/// This lets any other side borrow this &mut T. The data is borrow-able only
+/// This lets any other side borrow the `&mut T`. The  is borrow-able only
 /// while the lender awaits, and the lending side can await until someone wants
 /// to borrow. The semantics enforce at most one side has a mutable reference
 /// at any given time.
 ///
 /// This lets us share any mutable object between distinct async contexts
-/// without `Arc<Mutex>` over the object in question and without relying on any
-/// kind of internal mutability. It's mostly aimed at single-threaded executors
-/// where internal mutability is an unnecessary complication. Nevertheless,
-/// the Mutex is Send+Sync and can be safely used from any number of threads.
+/// without [`Arc`]<[`Mutex`]> over the object in question and without relying
+/// on any kind of internal mutability. It's mostly aimed at single-threaded
+/// executors where internal mutability is an unnecessary complication.
+/// Still, the [`BorrowMutex`] is Send+Sync and can be safely used from
+/// any number of threads.
 ///
-/// The API is fully safe and doesn't cause UB under any circumstances, but
-/// it's not able to enforce all the semantics at compile time. I.e. if a
-/// lending side of a transaction drops the lending Future before it's
-/// resolved (before the borrowing side stops using it), the process will
-/// immediately abort (...after printing an error message).
+/// [`Arc`]: std::sync::Arc
+/// [`Mutex`]: std::sync::Mutex
 pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
     inner_ref: UnsafeCell<Option<*mut T>>,
     lend_waiter: AtomicWaiter,
@@ -46,13 +46,11 @@ pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
     borrowers: MPMC<MAX_BORROWERS, BorrowMutexRef>,
 }
 
-unsafe impl<const M: usize, T: ?Sized> Send for BorrowMutex<M, T> {}
-unsafe impl<const M: usize, T: ?Sized> Sync for BorrowMutex<M, T> {}
-
 impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     pub const MAX_BORROWERS: usize = M;
 
-    pub fn new() -> Self {
+    /// Create a new empty [`BorrowMutex`]
+    pub const fn new() -> Self {
         Self {
             inner_ref: UnsafeCell::new(None),
             lend_waiter: AtomicWaiter::new(),
@@ -64,7 +62,19 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     }
 
     /// Retrieve a Future that resolves when a reference is lended.
-    /// See [`Self::lend()`]
+    ///
+    /// The borrowers are lended to in FIFO order. A borrower which
+    /// was lended to must be dropped in order for further borrows to
+    /// happen.
+    ///
+    /// There is a limit to the number of concurrent borrowers -
+    /// [`MAX_BORROWERS`] - but this function never fails. If the limit
+    /// is reached, the returned [`BorrowGuardUnarmed`] will resolve to
+    /// error on its first poll.
+    ///
+    /// See [`BorrowMutex::lend()`]
+    ///
+    /// [`MAX_BORROWERS`]: Self::MAX_BORROWERS
     pub fn request_borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, M, T> {
         BorrowGuardUnarmed {
             mutex: self,
@@ -73,7 +83,12 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
     }
 
-    /// Retrieve a Future that resolves as soon as any borrow request is pending
+    /// Retrieve a Future that resolves as soon as any borrow request is pending.
+    ///
+    /// # Note
+    ///
+    /// This can be called concurrently from multiple async contexts but it's
+    /// hardly useful this way. See [`BorrowMutex::lend()`] for its limitations.
     pub fn wait_to_lend<'g, 'm: 'g>(&'m self) -> Lender<'g, M, T> {
         Lender { mutex: self }
     }
@@ -81,8 +96,13 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// Lend a mutable reference to the first borrower (FIFO order).
     /// This can be called even if there are no borrowers at the time (and will
     /// immediately return None), but since it holds a mutable reference and
-    /// prevents its further use, it's recommended to first await the lender
-    /// ([`Lender`], obtained with [`Self::wait_to_lend`]).
+    /// prevents its further use, it's recommended to first call
+    /// [`BorrowMutex::wait_to_lend()`].
+    ///
+    /// # Note
+    ///
+    /// Only one value may be lended to the mutex at a time. Trying to lend
+    /// while a previous [`LendGuard`] still exists will abort the entire process.
     pub fn lend<'g, 'm: 'g>(&'m self, value: &'g mut T) -> Option<LendGuard<'g, M, T>> {
         if self.lender_present.swap(true, Ordering::AcqRel) {
             eprintln!("multiple distinct references lended to a BorrowMutex");
@@ -100,7 +120,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             std::process::abort();
         }
 
-        // SAFETY: We're the only ones writing this value and [`Self::lender_lended`]
+        // SAFETY: We're the only ones writing this value and [`BorrowMutex::lender_lended`]
         // atomic makes sure no one is currently reading it
         unsafe { *self.inner_ref.get() = Some(value) };
         let was_lended = self.lender_lended.swap(true, Ordering::AcqRel);
@@ -150,6 +170,9 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     }
 }
 
+unsafe impl<const M: usize, T: ?Sized> Send for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T: ?Sized> Sync for BorrowMutex<M, T> {}
+
 impl<const M: usize, T: ?Sized> Default for BorrowMutex<M, T> {
     fn default() -> Self {
         Self::new()
@@ -165,8 +188,8 @@ impl<const M: usize, T: ?Sized> core::fmt::Debug for BorrowMutex<M, T> {
     }
 }
 
-/// Common part between lend guard and borrow guard.
-/// This is kept inside the BorrowMutex MPMC until it can be safely
+/// Common part between [`LendGuard`] and [`BorrowGuardUnarmed`]/[`BorrowGuardArmed`].
+/// This is kept inside the [`BorrowMutex`]'s MPMC until it can be safely
 /// dropped.
 ///
 /// TODO: This is currently 40bytes on x86_64, but could be 24bytes if we
@@ -177,7 +200,23 @@ struct BorrowMutexRef {
     guard_present: AtomicBool,
 }
 
-/// TODO: doc
+/// An RAII implementation of a "scoped lock" of a mutex. This is an unarmed
+/// variant which is still awaiting a value to be lended.
+///
+/// This structure is created by the [`BorrowMutex::request_borrow`] method.
+///
+/// It doesn't provide any access to the underlying structure yet, and has to
+/// be polled to completion first. It should resolve into an armed
+/// [`BorrowGuardArmed`] variant.
+///
+/// Borrows are resolved in FIFO order, but they need to be polled at
+/// least once to be properly "registered" and considered for lending to.
+/// The lending happens via [`BorrowMutex::wait_to_lend()`] and
+/// [`BorrowMutex::lend()`]).
+///
+/// If an [`BorrowGuardUnarmed`] is dropped (falls out of scope) before
+/// resolving to [`BorrowGuardArmed`], it effectively cancels the borrow
+/// request, letting other potential borrowers borrow the lended value.
 pub struct BorrowGuardUnarmed<'g, const M: usize, T: ?Sized> {
     mutex: &'g BorrowMutex<M, T>,
     inner: AtomicPtr<BorrowMutexRef>,
@@ -270,11 +309,20 @@ impl<'m, const M: usize, T: ?Sized> Drop for BorrowGuardUnarmed<'m, M, T> {
     }
 }
 
-/// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
-/// of only atomics.
 unsafe impl<'m, const M: usize, T: ?Sized> Send for BorrowGuardUnarmed<'m, M, T> {}
 
-/// TODO: doc
+/// An RAII implementation of a "scoped lock" of a mutex. This is an armed
+/// variant which provides access to the lended value via its [`Deref`] and
+/// [`DerefMut`] implementations.
+///
+/// This structure is created by polling [`BorrowGuardUnarmed`] to completion.
+///
+/// When [`BorrowGuardArmed`] is dropped (falls out of scope) the associated
+/// future on the lender side ([`LendGuard`]) is completed and can be dropped,
+/// which enables further lends to the [`BorrowMutex`].
+///
+/// [`Deref`]: core::ops::Deref
+/// [`DerefMut`]: core::ops::DerefMut
 pub struct BorrowGuardArmed<'g, T: ?Sized> {
     inner_ref: *mut T,
     lend_waiter: &'g AtomicWaiter,
@@ -331,7 +379,10 @@ unsafe impl<'m, T: ?Sized> Send for BorrowGuardArmed<'m, T> {}
 /// some sense to impl Sync.
 unsafe impl<'m, T: ?Sized> Sync for BorrowGuardArmed<'m, T> {}
 
-/// TODO: doc
+/// A Lender of the [`BorrowMutex`] currently awaiting a [`BorrowGuardUnarmed`]
+/// to lend to.
+///
+/// This structure is created by [`BorrowMutex::wait_to_lend()`].
 pub struct Lender<'l, const M: usize, T: ?Sized> {
     mutex: &'l BorrowMutex<M, T>,
 }
@@ -363,13 +414,22 @@ impl<'m, const M: usize, T: ?Sized> Future for Lender<'m, M, T> {
 }
 
 impl<'g, 'm: 'g, const M: usize, T: ?Sized> Lender<'m, M, T> {
-    /// Alias to [`BorrowMutex::lend`] with exact same semantics.
+    /// Alias to [`BorrowMutex::lend`] with the exact same semantics.
     pub fn lend(&'m self, value: &'g mut T) -> Option<LendGuard<'g, M, T>> {
         self.mutex.lend(value)
     }
 }
 
-/// TODO: doc
+/// An RAII implementation of a "scoped lock" of a lending side of a mutex.
+/// This structure is created by [`BorrowMutex::lend()`], and is associated
+/// with a certain [`BorrowGuardUnarmed`].
+///
+/// This structure must be polled to completion before being dropped.
+/// Trying to drop it prematurely will cause the entire process to abort.
+///
+/// On the first poll of [`LendGuard`] the associated [`BorrowGuardUnarmed`]
+/// will resolve (effectively - it will turned armed), and [`LendGuard`] will
+/// resolve once the armed guard - [`BorrowGuardArmed`] - is dropped.
 pub struct LendGuard<'l, const M: usize, T: ?Sized> {
     mutex: &'l BorrowMutex<M, T>,
     borrow: &'l BorrowMutexRef,
@@ -427,6 +487,4 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
     }
 }
 
-/// SAFETY: This is merely a pointer to a state within BorrowMutex that consists
-/// of only atomics.
 unsafe impl<'l, const M: usize, T: ?Sized> Send for LendGuard<'l, M, T> {}
