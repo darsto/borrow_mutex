@@ -11,14 +11,14 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomPinned;
 use std::mem::ManuallyDrop;
 
+use atomic_waker::{AtomicWaker, AtomicWakerState};
 use thiserror::Error;
 
 #[doc(hidden)]
-pub mod atomic_waiter;
-use atomic_waiter::AtomicWaiter;
-#[doc(hidden)]
 pub mod mpmc;
 use mpmc::MPMC;
+#[doc(hidden)]
+mod atomic_waker;
 
 /// Async Mutex which does not require wrapping the target structure.
 /// A `&mut T` can be lended to the mutex at any given time.
@@ -39,7 +39,8 @@ use mpmc::MPMC;
 /// [`Mutex`]: std::sync::Mutex
 pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
     inner_ref: UnsafeCell<Option<*mut T>>,
-    lend_waiter: AtomicWaiter,
+    lend_waiter: AtomicWaker,
+    lend_waiter_state: AtomicWakerState,
     lender_present: AtomicBool,
     lender_lended: AtomicBool,
     terminated: AtomicBool,
@@ -53,7 +54,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     pub const fn new() -> Self {
         Self {
             inner_ref: UnsafeCell::new(None),
-            lend_waiter: AtomicWaiter::new(),
+            lend_waiter: AtomicWaker::new(None),
+            lend_waiter_state: AtomicWakerState::new(0),
             lender_present: AtomicBool::new(false),
             lender_lended: AtomicBool::new(false),
             terminated: AtomicBool::new(false),
@@ -195,7 +197,8 @@ impl<const M: usize, T: ?Sized> core::fmt::Debug for BorrowMutex<M, T> {
 /// TODO: This is currently 40bytes on x86_64, but could be 24bytes if we
 /// organized the fields
 struct BorrowMutexRef {
-    borrow_waiter: AtomicWaiter,
+    borrow_waker: AtomicWaker,
+    borrow_waker_state: AtomicWakerState,
     ref_acquired: AtomicBool,
     guard_present: AtomicBool,
 }
@@ -256,7 +259,8 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
                 .mutex
                 .borrowers //
                 .push(BorrowMutexRef {
-                    borrow_waiter: AtomicWaiter::new(),
+                    borrow_waker: AtomicWaker::new(None),
+                    borrow_waker_state: AtomicWakerState::new(0),
                     ref_acquired: AtomicBool::new(false),
                     guard_present: AtomicBool::new(true),
                 })
@@ -266,7 +270,7 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
 
             // borrow guard will turn ready when any lend guard sees us, so
             // try to awake any sleeping one
-            self.mutex.lend_waiter.wake();
+            atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
             self.inner.store(inner.get(), Ordering::Relaxed);
         }
 
@@ -274,11 +278,13 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
         // drops, which can only happen after this borrow guard is dropped. There
         // are no other mutable references to this object, so soundness is preserved
         let inner = unsafe { &mut *self.inner.load(Ordering::Relaxed) };
-        if inner.borrow_waiter.poll_const(cx) == Poll::Pending {
+        if atomic_waker::poll_const(&inner.borrow_waker, &inner.borrow_waker_state, cx.waker())
+            == Poll::Pending
+        {
             return Poll::Pending;
         }
 
-        // The borrow_waiter turns ready only when wake() is called.
+        // The borrow_waker turns ready only when wake() is called.
         // There are no spurious wakeups, and this is the only ready poll we get.
         assert!(self.mutex.lender_lended.load(Ordering::Acquire));
         // SAFETY: The object remains valid until we unset [`BorrowMutexRef::guard_present`]
@@ -288,6 +294,7 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
         Poll::Ready(Ok(BorrowGuardArmed {
             inner_ref,
             lend_waiter: &self.mutex.lend_waiter,
+            lend_waiter_state: &self.mutex.lend_waiter_state,
             inner: AtomicPtr::new(inner),
         }))
     }
@@ -304,7 +311,7 @@ impl<'m, const M: usize, T: ?Sized> Drop for BorrowGuardUnarmed<'m, M, T> {
                 .guard_present
                 .store(false, Ordering::Release);
             // self.inner is no longer valid
-            self.mutex.lend_waiter.wake();
+            atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
         }
     }
 }
@@ -325,7 +332,8 @@ unsafe impl<'m, const M: usize, T: ?Sized> Send for BorrowGuardUnarmed<'m, M, T>
 /// [`DerefMut`]: core::ops::DerefMut
 pub struct BorrowGuardArmed<'g, T: ?Sized> {
     inner_ref: *mut T,
-    lend_waiter: &'g AtomicWaiter,
+    lend_waiter: &'g AtomicWaker,
+    lend_waiter_state: &'g AtomicWakerState,
     inner: AtomicPtr<BorrowMutexRef>,
 }
 
@@ -342,6 +350,7 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
         BorrowGuardArmed {
             inner_ref,
             lend_waiter: orig.lend_waiter,
+            lend_waiter_state: orig.lend_waiter_state,
             inner: AtomicPtr::new(orig.inner.load(Ordering::Relaxed)),
         }
     }
@@ -370,7 +379,7 @@ impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
             .guard_present
             .store(false, Ordering::Release);
         // self.inner is no longer valid
-        self.lend_waiter.wake();
+        atomic_waker::wake(self.lend_waiter, self.lend_waiter_state);
     }
 }
 
@@ -404,7 +413,12 @@ impl<'m, const M: usize, T: ?Sized> Future for Lender<'m, M, T> {
         }
         // LendGuard could have turned Ready without ever polling, so
         // also handle the spurious wakes here
-        while self.mutex.lend_waiter.poll_const(cx) == Poll::Ready(()) {
+        while atomic_waker::poll_const(
+            &self.mutex.lend_waiter,
+            &self.mutex.lend_waiter_state,
+            cx.waker(),
+        ) == Poll::Ready(())
+        {
             if !self.mutex.borrowers.is_empty() {
                 return Poll::Ready(());
             }
@@ -446,7 +460,7 @@ impl<'m, const M: usize, T: ?Sized> Future for LendGuard<'m, M, T> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if !self.borrow.ref_acquired.swap(true, Ordering::AcqRel) {
             // first time polling this LendGuard, so wake the Borrower
-            self.borrow.borrow_waiter.wake();
+            atomic_waker::wake(&self.borrow.borrow_waker, &self.borrow.borrow_waker_state);
 
             // the BorrowGuard could have been already dropped and won't wake us
             // again, so check now
@@ -455,7 +469,12 @@ impl<'m, const M: usize, T: ?Sized> Future for LendGuard<'m, M, T> {
             }
         }
 
-        while self.mutex.lend_waiter.poll_const(cx) == Poll::Ready(()) {
+        while atomic_waker::poll_const(
+            &self.mutex.lend_waiter,
+            &self.mutex.lend_waiter_state,
+            cx.waker(),
+        ) == Poll::Ready(())
+        {
             // lend_waiter could have been awoken due to a new BorrowGuard,
             // but we're pending until our BorrowGuard is dropped
             if !self.borrow.guard_present.load(Ordering::Acquire) {
