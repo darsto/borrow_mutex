@@ -106,6 +106,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// Only one value may be lended to the mutex at a time. Trying to lend
     /// while a previous [`LendGuard`] still exists will abort the entire process.
     pub fn lend<'g, 'm: 'g>(&'m self, value: &'g mut T) -> Option<LendGuard<'g, M, T>> {
+        // Release ordering is only used to effectively synchronize any caller's
+        // access to the shared memory
         if self.lender_present.swap(true, Ordering::AcqRel) {
             eprintln!("multiple distinct references lended to a BorrowMutex");
             // we could return None, but this would be ill-advised to try to
@@ -125,7 +127,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         // SAFETY: We're the only ones writing this value and [`BorrowMutex::lender_lended`]
         // atomic makes sure no one is currently reading it
         unsafe { *self.inner_ref.get() = Some(value) };
-        let was_lended = self.lender_lended.swap(true, Ordering::AcqRel);
+        let was_lended = self.lender_lended.swap(true, Ordering::Release);
         assert!(!was_lended);
 
         // SAFETY: We're the only lend-er, and the object in MPMC gets only
@@ -142,7 +144,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// Mark the mutex as terminated, meaning any borrows requests (pending or
     /// to-be-made) will return [`Error::Terminated`].
     pub async fn terminate(&self) {
-        if self.terminated.swap(true, Ordering::AcqRel) {
+        if self.terminated.swap(true, Ordering::Acquire) {
             // already terminated
             return;
         }
@@ -286,7 +288,7 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
 
         // The borrow_waker turns ready only when wake() is called.
         // There are no spurious wakeups, and this is the only ready poll we get.
-        assert!(self.mutex.lender_lended.load(Ordering::Acquire));
+        assert!(self.mutex.lender_lended.load(Ordering::Relaxed));
         // SAFETY: The object remains valid until we unset [`BorrowMutexRef::guard_present`]
         // (which happens at [`BorrowGuardArmed::drop`]).
         let inner_ref = unsafe { *self.mutex.inner_ref.get() }.unwrap();
@@ -309,7 +311,7 @@ impl<'m, const M: usize, T: ?Sized> Drop for BorrowGuardUnarmed<'m, M, T> {
             // object, so soundness is preserved
             unsafe { &*self.inner.load(Ordering::Relaxed) }
                 .guard_present
-                .store(false, Ordering::Release);
+                .store(false, Ordering::Relaxed);
             // self.inner is no longer valid
             atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
         }
@@ -458,7 +460,7 @@ impl<'m, const M: usize, T: ?Sized> Future for LendGuard<'m, M, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.borrow.ref_acquired.swap(true, Ordering::AcqRel) {
+        if !self.borrow.ref_acquired.swap(true, Ordering::Relaxed) {
             // first time polling this LendGuard, so wake the Borrower
             atomic_waker::wake(&self.borrow.borrow_waker, &self.borrow.borrow_waker_state);
 
@@ -497,7 +499,7 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
             // So abort the entire process here.
             std::process::abort();
         }
-        self.mutex.lender_lended.store(false, Ordering::Release);
+        self.mutex.lender_lended.store(false, Ordering::Relaxed);
         unsafe { *self.mutex.inner_ref.get() = None };
         let _ = self.mutex.borrowers.pop().unwrap();
         // self.borrow should be no longer accessed (it's still valid memory with
