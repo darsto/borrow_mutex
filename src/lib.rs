@@ -149,7 +149,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             return;
         }
 
-        if self.lender_present.load(Ordering::Acquire) {
+        if self.lender_present.swap(true, Ordering::Acquire) {
             eprintln!("BorrowMutex terminated while a reference is lended");
             // we can't gracefully proceed now, so abort the entire process
             std::process::abort();
