@@ -23,9 +23,9 @@ mod atomic_waker;
 /// Async Mutex which does not require wrapping the target structure.
 /// A `&mut T` can be lended to the mutex at any given time.
 ///
-/// This lets any other side borrow the `&mut T`. The  is borrow-able only
-/// while the lender awaits, and the lending side can await until someone wants
-/// to borrow. The semantics enforce at most one side has a mutable reference
+/// This lets any other side borrow the `&mut T`. The mutable ref is borrow-able
+/// only while the lender awaits, and the lending side can await until someone
+/// wants to borrow. The semantics enforce at most one side has a mutable reference
 /// at any given time.
 ///
 /// This lets us share any mutable object between distinct async contexts
