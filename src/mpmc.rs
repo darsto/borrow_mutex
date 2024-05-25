@@ -95,7 +95,7 @@ impl<const S: usize, T> MPMC<S, T> {
                     // have written the entry yet, and also its future write to tail may
                     // effectively move the tail backwards.
                     // so just wait with a busy-loop
-                    std::thread::yield_now();
+                    core::hint::spin_loop();
                 }
             }
         }
@@ -146,7 +146,7 @@ impl<const S: usize, T> MPMC<S, T> {
                     // have read its entry yet, and also its future write to tail may
                     // effectively move the tail backwards.
                     // so just wait with a busy-loop
-                    std::thread::yield_now();
+                    core::hint::spin_loop();
                 }
             }
         }
