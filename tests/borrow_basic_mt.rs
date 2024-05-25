@@ -30,9 +30,8 @@ fn borrow_basic_double_thread() {
             if test.counter >= 20 {
                 break;
             }
-            let mut timer = Timer::after(Duration::from_millis(100)).fuse();
             futures::select! {
-                _ = timer => {
+                _ = Timer::after(Duration::from_millis(100)).fuse() => {
                     if test.counter < 10 {
                         test.counter += 1;
                     }

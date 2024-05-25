@@ -70,10 +70,9 @@ let f2 = async {
         if test.counter >= 20 {
             break;
         }
-        let mut timer = smol::Timer::after(std::time::Duration::from_millis(200)).fuse();
         // either sleep 200ms or lend if needed in the meantime
         futures::select! {
-            _ = timer => {
+            _ = smol::Timer::after(std::time::Duration::from_millis(200)).fuse() => {
                 if test.counter < 10 {
                     test.counter += 1;
                 }

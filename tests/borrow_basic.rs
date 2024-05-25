@@ -23,9 +23,8 @@ fn borrow_basic_single_thread() {
             if test.counter >= 20 {
                 break;
             }
-            let mut timer = Timer::after(Duration::from_millis(100)).fuse();
             futures::select! {
-                _ = timer => {
+                _ = Timer::after(Duration::from_millis(200)).fuse() => {
                     if test.counter < 10 {
                         test.counter += 1;
                     }
@@ -45,7 +44,7 @@ fn borrow_basic_single_thread() {
             test.counter += 1;
             println!("t2: counter: {}", test.counter);
             drop(test);
-            Timer::after(Duration::from_millis(200)).await;
+            Timer::after(Duration::from_millis(100)).await;
         }
     };
 
