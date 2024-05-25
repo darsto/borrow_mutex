@@ -2,14 +2,14 @@
 // Copyright(c) 2024 Darek Stojaczyk
 #![doc = include_str!("../README.md")]
 
+use core::cell::UnsafeCell;
 use core::future::Future;
+use core::marker::PhantomPinned;
+use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
-use std::cell::UnsafeCell;
-use std::marker::PhantomPinned;
-use std::mem::ManuallyDrop;
 
 use atomic_waker::{AtomicWaker, AtomicWakerState};
 use thiserror::Error;
