@@ -17,6 +17,10 @@ executors where internal mutability is an unnecessary complication.
 Still, the [`BorrowMutex`] is Send+Sync and can be safely used from
 any number of threads.
 
+The most common use case is having a state handled entirely in its own
+async context, but occasionally having to be accessed elsewhere -
+in another async context.
+
 Since the shared data doesn't have to be wrapped inside an [`Arc`],
 it doesn't have to be allocated on the heap. In fact, BorrowMutex does not
 perform any allocations whatsoever. The

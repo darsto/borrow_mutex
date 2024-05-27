@@ -1,11 +1,11 @@
 //! This is inspired by atomic_waker.rs from futures-core-0.3.30.
 //! The AtomicWaker struct and its methods were replaced by regular
-//! functions which take its Option<Waker> and the state variable
+//! functions which take its `Option<Waker>` and the state variable
 //! as separate parameters. This lets us pack the desired structure
 //! with additional data without any padding bytes.
 //! On top of that, this AtomicWaker will return Poll::Ready(())
-//! if wake() was called anytime before, even if this is the first
-//! executed poll
+//! if wake() was called anytime before, even if this is was the
+//! first executed poll
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::AtomicU8;

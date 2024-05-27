@@ -50,7 +50,7 @@ pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
 impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     pub const MAX_BORROWERS: usize = M;
 
-    /// Create a new empty [`BorrowMutex`]
+    /// Create a new empty [`BorrowMutex`].
     pub const fn new() -> Self {
         Self {
             inner_ref: UnsafeCell::new(None),
@@ -64,19 +64,22 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     }
 
     /// Retrieve a Future that resolves when a reference is lended.
+    /// Specifically, it resolves to [`Result`]<[`BorrowGuardArmed`], [`Error`]>.
     ///
-    /// The borrowers are lended to in FIFO order. A borrower which
-    /// was lended to must be dropped in order for further borrows to
-    /// happen.
+    /// The error can be:
+    ///  - the max number of concurrent borrowers was reached - [`MAX_BORROWERS`].
+    ///  - the mutex was terminated via [`BorrowMutex::terminate()`] call.
     ///
-    /// There is a limit to the number of concurrent borrowers -
-    /// [`MAX_BORROWERS`] - but this function never fails. If the limit
-    /// is reached, the returned [`BorrowGuardUnarmed`] will resolve to
-    /// error on its first poll.
+    /// The borrowers are lended to in FIFO order but they get put to the
+    /// waiting queue only on their first poll.
     ///
-    /// See [`BorrowMutex::lend()`]
+    /// A borrow guard which was lended to must be dropped to allow further
+    /// borrows to happen.
+    ///
+    /// Also see [`BorrowMutex::lend()`].
     ///
     /// [`MAX_BORROWERS`]: Self::MAX_BORROWERS
+    /// [`Error`]: enum@crate::Error
     pub fn request_borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, M, T> {
         BorrowGuardUnarmed {
             mutex: self,
@@ -95,16 +98,18 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         Lender { mutex: self }
     }
 
-    /// Lend a mutable reference to the first borrower (FIFO order).
+    /// Lend a mutable reference to the first waiting borrower (FIFO order).
     /// This can be called even if there are no borrowers at the time (and will
-    /// immediately return None), but since it holds a mutable reference and
-    /// prevents its further use, it's recommended to first call
+    /// immediately return None). It is recommended to first call
     /// [`BorrowMutex::wait_to_lend()`].
     ///
     /// # Note
     ///
     /// Only one value may be lended to the mutex at a time. Trying to lend
     /// while a previous [`LendGuard`] still exists will abort the entire process.
+    ///
+    /// Trying to lend after a mutex was terminated ([`BorrowMutex::terminate()`])
+    /// will also abort the process.
     pub fn lend<'g, 'm: 'g>(&'m self, value: &'g mut T) -> Option<LendGuard<'g, M, T>> {
         // Release ordering is only used to effectively synchronize any caller's
         // access to the shared memory
@@ -143,6 +148,16 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
 
     /// Mark the mutex as terminated, meaning any borrows requests (pending or
     /// to-be-made) will return [`Error::Terminated`].
+    ///
+    /// # Note
+    ///
+    /// This is an async function as the existing borrowers need to be awoken
+    /// one by one to drop their guard, which then allows this function to
+    /// proceed. This only applies to existing borrowers - Any borrows made
+    /// while this function is executing will immediately return an error on
+    /// the first poll.
+    ///
+    /// Calling this function while a value is lended will abort the process.
     pub async fn terminate(&self) {
         if self.terminated.swap(true, Ordering::Acquire) {
             // already terminated
