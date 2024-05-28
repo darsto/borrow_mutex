@@ -556,7 +556,8 @@ fn abort(msg: &str) -> ! {
         let _ = std::io::stderr().write_all(b"\n");
         let _ = std::io::stderr().flush();
         // SAFETY: ABORT_FN is always set to a valid fn()
-        let abort_fn = unsafe { *(ABORT_FN.as_ptr() as *mut fn() -> !) };
+        let abort_fn =
+            unsafe { *(&ABORT_FN.load(Ordering::Relaxed) as *const _ as *mut fn() -> !) };
         abort_fn();
     }
     #[cfg(not(feature = "std"))]
