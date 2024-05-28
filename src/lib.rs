@@ -539,6 +539,15 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
 
 unsafe impl<'l, const M: usize, T: ?Sized> Send for LendGuard<'l, M, T> {}
 
+#[cfg(feature = "std")]
+static ABORT_FN: AtomicPtr<fn() -> !> = AtomicPtr::new(std::process::abort as *mut _);
+
+#[cfg(feature = "std")]
+#[doc(hidden)]
+pub unsafe fn set_abort_fn(f: fn() -> !) {
+    ABORT_FN.store(f as *mut _, Ordering::Relaxed);
+}
+
 fn abort(msg: &str) -> ! {
     #[cfg(feature = "std")]
     {
@@ -546,7 +555,9 @@ fn abort(msg: &str) -> ! {
         let _ = std::io::stderr().write_all(msg.as_bytes());
         let _ = std::io::stderr().write_all(b"\n");
         let _ = std::io::stderr().flush();
-        std::process::abort();
+        // SAFETY: ABORT_FN is always set to a valid fn()
+        let abort_fn = unsafe { *(ABORT_FN.as_ptr() as *mut fn() -> !) };
+        abort_fn();
     }
     #[cfg(not(feature = "std"))]
     {
