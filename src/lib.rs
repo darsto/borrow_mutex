@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 #![doc = include_str!("../README.md")]
+#![no_std]
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(not(any(feature = "std", panic = "abort")))]
+compile_error!("no_std version of this crate requires panic = abort to ensure safety.");
 
 use core::cell::UnsafeCell;
 use core::future::Future;
@@ -12,7 +19,6 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
 
 use atomic_waker::{AtomicWaker, AtomicWakerState};
-use thiserror::Error;
 
 #[doc(hidden)]
 pub mod mpmc;
@@ -114,19 +120,17 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         // Release ordering is only used to effectively synchronize any caller's
         // access to the shared memory
         if self.lender_present.swap(true, Ordering::AcqRel) {
-            eprintln!("multiple distinct references lended to a BorrowMutex");
             // we could return None, but this would be ill-advised to try to
             // handle it. The rest of error handling uses abort(), so do the
             // same here for consistency.
-            std::process::abort();
+            abort("multiple distinct references lended to a BorrowMutex");
         }
 
         if self.terminated.load(Ordering::Acquire) {
-            eprintln!("BorrowMutex lended to while terminated");
             // we could return None, but this would be ill-advised to try to
             // handle it. The rest of error handling uses abort(), so do the
             // same here for consistency.
-            std::process::abort();
+            abort("BorrowMutex lended to while terminated");
         }
 
         // SAFETY: We're the only ones writing this value and [`BorrowMutex::lender_lended`]
@@ -165,9 +169,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
 
         if self.lender_present.swap(true, Ordering::Acquire) {
-            eprintln!("BorrowMutex terminated while a reference is lended");
             // we can't gracefully proceed now, so abort the entire process
-            std::process::abort();
+            abort("BorrowMutex terminated while a reference is lended");
         }
 
         while let Some(borrow) = self.borrowers.peek() {
@@ -244,13 +247,25 @@ pub struct BorrowGuardUnarmed<'g, const M: usize, T: ?Sized> {
 }
 
 /// Possible borrow errors
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("Too many borrow requests that are still pending")]
     TooManyBorrows,
-    #[error("The mutex was terminated and won't be ever lend-ed to again")]
     Terminated,
 }
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use Error as E;
+        let msg = match self {
+            E::TooManyBorrows => "Too many borrow requests that are still pending",
+            E::Terminated => "The mutex was terminated and won't be ever lend-ed to again",
+        };
+        f.write_str(msg)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {}
 
 // await until the reference is lended
 impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T> {
@@ -405,8 +420,8 @@ unsafe impl<'m, T: ?Sized> Send for BorrowGuardArmed<'m, T> {}
 /// some sense to impl Sync.
 unsafe impl<'m, T: ?Sized> Sync for BorrowGuardArmed<'m, T> {}
 
-/// A Lender of the [`BorrowMutex`] currently awaiting a [`BorrowGuardUnarmed`]
-/// to lend to.
+/// A Future of the [`BorrowMutex`] which resolves as soon as any borrow request
+/// is pending.
 ///
 /// This structure is created by [`BorrowMutex::wait_to_lend()`].
 pub struct Lender<'l, const M: usize, T: ?Sized> {
@@ -453,7 +468,7 @@ impl<'g, 'm: 'g, const M: usize, T: ?Sized> Lender<'m, M, T> {
 
 /// An RAII implementation of a "scoped lock" of a lending side of a mutex.
 /// This structure is created by [`BorrowMutex::lend()`], and is associated
-/// with a certain [`BorrowGuardUnarmed`].
+/// with a certain borrower.
 ///
 /// This structure must be polled to completion before being dropped.
 /// Trying to drop it prematurely will cause the entire process to abort.
@@ -506,13 +521,12 @@ impl<'m, const M: usize, T: ?Sized> Future for LendGuard<'m, M, T> {
 impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
     fn drop(&mut self) {
         if self.borrow.guard_present.load(Ordering::Acquire) {
-            eprintln!("LendGuard dropped while the reference is still borrowed");
             // the mutable reference is about to be re-gained in the lending context while
             // it's still used in the borrowed context. We can't let that happen, and we can't
             // even panic here as this may invalidate the referenced object. If the borrow is
             // happening independently of this panic (i.e. on another thread) it would be UB.
             // So abort the entire process here.
-            std::process::abort();
+            abort("LendGuard dropped while the reference is still borrowed");
         }
         self.mutex.lender_lended.store(false, Ordering::Relaxed);
         unsafe { *self.mutex.inner_ref.get() = None };
@@ -524,3 +538,18 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
 }
 
 unsafe impl<'l, const M: usize, T: ?Sized> Send for LendGuard<'l, M, T> {}
+
+fn abort(msg: &str) -> ! {
+    #[cfg(feature = "std")]
+    {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(msg.as_bytes());
+        let _ = std::io::stderr().write_all(b"\n");
+        let _ = std::io::stderr().flush();
+        std::process::abort();
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        panic!("{msg}");
+    }
+}
