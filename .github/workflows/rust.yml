@@ -19,6 +19,21 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  fmt:
+    name: Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@clippy
+      - run: cargo clippy -- -D warnings
+
   msrv:
     runs-on: ubuntu-latest
     steps:

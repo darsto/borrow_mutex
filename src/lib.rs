@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
+#![allow(unknown_lints)]
+#![deny(clippy::enum_glob_use)]
+#![allow(clippy::missing_transmute_annotations)]
+#![allow(clippy::doc_lazy_continuation)]
 #![doc = include_str!("../README.md")]
 #![no_std]
 
