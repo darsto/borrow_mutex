@@ -1,3 +1,15 @@
+[![crates.io](https://img.shields.io/crates/v/borrow_mutex)][crates.io]
+[![libs.rs](https://img.shields.io/badge/libs.rs-borrow_mutex-orange)][libs.rs]
+[![documentation](https://img.shields.io/docsrs/borrow_mutex)][documentation]
+[![rust-version](https://img.shields.io/static/v1?label=Rust&message=1.65.0)][rust-version]
+[![license](https://img.shields.io/crates/l/borrow_mutex)][license]
+
+[crates.io]: https://crates.io/crates/borrow_mutex
+[libs.rs]: https://lib.rs/crates/borrow_mutex
+[documentation]: https://docs.rs/borrow_mutex
+[rust-version]: https://www.rust-lang.org
+[license]: https://github.com/darsto/borrow_mutex/blob/master/LICENSE
+
 # BorrowMutex
 
 **Very initial version!** Use with caution
