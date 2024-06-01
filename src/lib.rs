@@ -19,7 +19,7 @@ use core::marker::PhantomPinned;
 use core::mem::ManuallyDrop;
 use core::pin::Pin;
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{self, AtomicBool, AtomicPtr, Ordering};
 use core::task::{Context, Poll};
 
 use atomic_waker::{AtomicWaker, AtomicWakerState};
@@ -167,10 +167,14 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     ///
     /// Calling this function while a value is lended will abort the process.
     pub async fn terminate(&self) {
-        if self.terminated.swap(true, Ordering::Acquire) {
+        if self.terminated.swap(true, Ordering::Relaxed) {
             // already terminated
             return;
         }
+
+        // Make sure self.terminated is immediately visible for concurrent
+        // borrowers as well as lenders
+        atomic::fence(Ordering::SeqCst);
 
         if self.lender_present.swap(true, Ordering::Acquire) {
             // we can't gracefully proceed now, so abort the entire process
@@ -277,11 +281,6 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.mutex.terminated.load(Ordering::Acquire) {
-            if self.inner.load(Ordering::Relaxed).is_null() {
-                // we haven't managed yet to register a real borrower, so
-                // no need to drop it in the Drop trait
-                self.terminated.store(true, Ordering::Relaxed)
-            }
             return Poll::Ready(Err(Error::Terminated));
         }
 
@@ -308,6 +307,11 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
             // try to awake any sleeping one
             atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
             self.inner.store(inner.get(), Ordering::Relaxed);
+        }
+
+        // The mutex could've been terminated just after we've pushed to the ring
+        if self.mutex.terminated.load(Ordering::Acquire) {
+            return Poll::Ready(Err(Error::Terminated));
         }
 
         // SAFETY: The object is kept inside the BorrowMutex until the lend guard
@@ -339,15 +343,18 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
 impl<'m, const M: usize, T: ?Sized> Drop for BorrowGuardUnarmed<'m, M, T> {
     fn drop(&mut self) {
         if !self.terminated.load(Ordering::Relaxed) {
-            // SAFETY: The object is kept inside the BorrowMutex until the lend guard
-            // drops, which can only happen after guard_present is set to false, (which
-            // we're just about to do). There are no other mutable references to this
-            // object, so soundness is preserved
-            unsafe { &*self.inner.load(Ordering::Relaxed) }
-                .guard_present
-                .store(false, Ordering::Relaxed);
-            // self.inner is no longer valid
-            atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
+            let ref_ptr = self.inner.load(Ordering::Relaxed);
+            if !ref_ptr.is_null() {
+                // SAFETY: The object is kept inside the BorrowMutex until the lend guard
+                // drops, which can only happen after guard_present is set to false, (which
+                // we're just about to do). There are no other mutable references to this
+                // object, so soundness is preserved
+                unsafe { &*ref_ptr }
+                    .guard_present
+                    .store(false, Ordering::Relaxed);
+                // self.inner is no longer valid
+                atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
+            }
         }
     }
 }
