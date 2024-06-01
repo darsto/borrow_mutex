@@ -50,9 +50,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@miri
       - name: Miri setup
         run: cargo miri setup
+      # - name: MPMC spam test # takes forever under Miri
+      #   run: cargo miri test --test mpmc_spam
       - name: Run tests
         run: |
           cargo miri test --test borrow_basic
           cargo miri test --test borrow_dyn
           cargo miri test --test abort
           cargo miri test --test borrow_basic_mt
+          cargo miri test --test borrow_corner_cases
