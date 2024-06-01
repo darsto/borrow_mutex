@@ -37,6 +37,8 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
                 Some(old_waker) if old_waker.will_wake(waker) => (),
                 _ => *atomic_waker = Some(waker.clone()),
             }
+            #[allow(dropping_references)]
+            drop(atomic_waker);
 
             let prev = state.swap(IDLING, AcqRel);
             // wake() could have been called just before setting the actual
