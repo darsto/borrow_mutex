@@ -313,7 +313,7 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
         // SAFETY: The object is kept inside the BorrowMutex until the lend guard
         // drops, which can only happen after this borrow guard is dropped. There
         // are no other mutable references to this object, so soundness is preserved
-        let inner = unsafe { &mut *self.inner.load(Ordering::Relaxed) };
+        let inner = unsafe { &*self.inner.load(Ordering::Relaxed) };
         if atomic_waker::poll_const(&inner.borrow_waker, &inner.borrow_waker_state, cx.waker())
             == Poll::Pending
         {
@@ -331,7 +331,7 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
             inner_ref,
             lend_waiter: &self.mutex.lend_waiter,
             lend_waiter_state: &self.mutex.lend_waiter_state,
-            inner: AtomicPtr::new(inner),
+            inner,
         }))
     }
 }
@@ -370,7 +370,7 @@ pub struct BorrowGuardArmed<'g, T: ?Sized> {
     inner_ref: *mut T,
     lend_waiter: &'g AtomicWaker,
     lend_waiter_state: &'g AtomicWakerState,
-    inner: AtomicPtr<BorrowMutexRef>,
+    inner: &'g BorrowMutexRef,
 }
 
 impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
@@ -387,7 +387,7 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
             inner_ref,
             lend_waiter: orig.lend_waiter,
             lend_waiter_state: orig.lend_waiter_state,
-            inner: AtomicPtr::new(orig.inner.load(Ordering::Relaxed)),
+            inner: orig.inner,
         }
     }
 }
@@ -407,13 +407,7 @@ impl<'g, T: ?Sized> core::ops::DerefMut for BorrowGuardArmed<'g, T> {
 
 impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
     fn drop(&mut self) {
-        // SAFETY: The object is kept inside the BorrowMutex until the lend guard
-        // drops, which can only happen after guard_present is set to false, (which
-        // we're just about to do). There are no other mutable references to this
-        // object, so soundness is preserved
-        unsafe { &*self.inner.load(Ordering::Relaxed) }
-            .guard_present
-            .store(false, Ordering::Release);
+        self.inner.guard_present.store(false, Ordering::Release);
         // self.inner is no longer valid
         atomic_waker::wake(self.lend_waiter, self.lend_waiter_state);
     }
