@@ -40,3 +40,18 @@ jobs:
     - uses: actions/checkout@v4
     - uses: taiki-e/install-action@cargo-hack
     - run: cargo hack check --rust-version --workspace --lib --ignore-private
+
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      MIRIFLAGS: "-Zmiri-ignore-leaks" # ignore detached background threads - at least futures-timer spawns one
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@miri
+      - name: Miri setup
+        run: cargo miri setup
+      - name: Run tests
+        run: |
+          cargo miri test --test borrow_basic
+          cargo miri test --test borrow_dyn
+          cargo miri test --test abort
