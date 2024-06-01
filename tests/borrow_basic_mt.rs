@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
-use smol::Timer;
+use futures_timer::Delay;
 
 use borrow_mutex::BorrowMutex;
 
@@ -16,50 +16,50 @@ struct TestObject {
 
 #[test]
 fn borrow_basic_double_thread() {
-    std::env::set_var("SMOL_THREADS", "2");
-
     let mutex = Arc::new(BorrowMutex::<16, TestObject>::new());
 
     let t1_mutex = mutex.clone();
-    let t1 = smol::spawn(async move {
-        let mut test = TestObject { counter: 1 };
+    let t1 = std::thread::spawn(|| {
+        futures::executor::block_on(async move {
+            let mut test = TestObject { counter: 1 };
 
-        eprintln!("t1 thread: {:?}", std::thread::current());
+            eprintln!("t1 thread: {:?}", std::thread::current());
 
-        loop {
-            if test.counter >= 20 {
-                break;
-            }
-            futures::select! {
-                _ = Timer::after(Duration::from_millis(100)).fuse() => {
-                    if test.counter < 10 {
-                        test.counter += 1;
+            loop {
+                if test.counter >= 20 {
+                    break;
+                }
+                futures::select! {
+                    _ = Delay::new(Duration::from_millis(100)).fuse() => {
+                        if test.counter < 10 {
+                            test.counter += 1;
+                        }
+                        eprintln!("t1: counter: {}", test.counter);
                     }
-                    eprintln!("t1: counter: {}", test.counter);
-                }
-                _ = t1_mutex.wait_to_lend().fuse() => {
-                    t1_mutex.lend(&mut test).unwrap().await;
+                    _ = t1_mutex.wait_to_lend().fuse() => {
+                        t1_mutex.lend(&mut test).unwrap().await;
+                    }
                 }
             }
-        }
 
-        t1_mutex.terminate().await;
+            t1_mutex.terminate().await;
+        })
     });
 
     let t2_mutex = mutex.clone();
-    let t2 = smol::spawn(async move {
-        eprintln!("t2 thread: {:?}", std::thread::current());
+    let t2 = std::thread::spawn(|| {
+        futures::executor::block_on(async move {
+            eprintln!("t2 thread: {:?}", std::thread::current());
 
-        while let Ok(mut test) = t2_mutex.request_borrow().await {
-            test.counter += 1;
-            eprintln!("t2: counter: {}", test.counter);
-            drop(test);
-            Timer::after(Duration::from_millis(200)).await;
-        }
+            while let Ok(mut test) = t2_mutex.request_borrow().await {
+                test.counter += 1;
+                eprintln!("t2: counter: {}", test.counter);
+                drop(test);
+                Delay::new(Duration::from_millis(200)).await;
+            }
+        })
     });
 
-    smol::block_on(async {
-        t1.await;
-        t2.await;
-    });
+    t1.join().unwrap();
+    t2.join().unwrap();
 }

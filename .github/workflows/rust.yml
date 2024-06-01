@@ -55,3 +55,4 @@ jobs:
           cargo miri test --test borrow_basic
           cargo miri test --test borrow_dyn
           cargo miri test --test abort
+          cargo miri test --test borrow_basic_mt
