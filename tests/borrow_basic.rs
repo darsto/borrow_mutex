@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use futures::FutureExt;
-use smol::Timer;
+use futures_timer::Delay;
 
 use borrow_mutex::BorrowMutex;
 
@@ -24,7 +24,7 @@ fn borrow_basic_single_thread() {
                 break;
             }
             futures::select! {
-                _ = Timer::after(Duration::from_millis(200)).fuse() => {
+                _ = Delay::new(Duration::from_millis(200)).fuse() => {
                     if test.counter < 10 {
                         test.counter += 1;
                     }
@@ -44,7 +44,7 @@ fn borrow_basic_single_thread() {
             test.counter += 1;
             println!("t2: counter: {}", test.counter);
             drop(test);
-            Timer::after(Duration::from_millis(100)).await;
+            Delay::new(Duration::from_millis(100)).await;
         }
     };
 

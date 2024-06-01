@@ -25,4 +25,5 @@ std = []
 
 [dev-dependencies]
 futures = "0.3.30"
+futures-timer = "3.0.3"
 smol = "1.3"

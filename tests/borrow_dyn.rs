@@ -4,7 +4,7 @@
 use std::{any::Any, time::Duration};
 
 use futures::FutureExt;
-use smol::Timer;
+use futures_timer::Delay;
 
 use borrow_mutex::BorrowMutex;
 
@@ -31,7 +31,7 @@ fn borrow_dyn_single_thread() {
                 break;
             }
             futures::select! {
-                _ = Timer::after(Duration::from_millis(100)).fuse() => {
+                _ = Delay::new(Duration::from_millis(100)).fuse() => {
                     if test.counter < 10 {
                         test.counter += 1;
                     }
@@ -54,7 +54,7 @@ fn borrow_dyn_single_thread() {
                 break;
             }
             futures::select! {
-                _ = Timer::after(Duration::from_millis(100)).fuse() => {
+                _ = Delay::new(Duration::from_millis(100)).fuse() => {
                     if test.another_counter < 10 {
                         test.another_counter += 1;
                         test.is_even = !test.is_even;
@@ -81,7 +81,7 @@ fn borrow_dyn_single_thread() {
                 assert_eq!(test.is_even, test.another_counter % 2 == 0);
             }
             drop(any);
-            Timer::after(Duration::from_millis(200)).await;
+            Delay::new(Duration::from_millis(200)).await;
         }
     };
 
