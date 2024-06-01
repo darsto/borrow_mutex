@@ -3,11 +3,24 @@ name = "borrow_mutex"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.65"
+readme = "README.md"
+authors = ["Darek Stojaczyk <darek@stojaczyk.pl>"]
+repository = "https://github.com/darsto/borrow_mutex"
+keywords = ["mutex", "lock", "async", "no_std"]
+categories = ["asynchronous", "rust-patterns", "no-std::no-alloc"]
+license = "MIT"
+description = """
+Async Rust Mutex which does not require wrapping the target structure
+"""
+
+[lints.clippy]
+enum_glob_use = "deny"
+incompatible_msrv = "allow"
 
 [dependencies]
 
 [features]
-default = [ "std" ]
+default = ["std"]
 std = []
 
 [dev-dependencies]
