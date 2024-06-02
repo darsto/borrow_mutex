@@ -13,10 +13,6 @@ description = """
 Async Rust Mutex which does not require wrapping the target structure
 """
 
-[lints.clippy]
-enum_glob_use = "deny"
-incompatible_msrv = "allow"
-
 [dependencies]
 
 [features]
