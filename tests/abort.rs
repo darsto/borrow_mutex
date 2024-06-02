@@ -21,7 +21,6 @@ struct TestObject {
 }
 
 fn test_double_lend_abort() {
-    // TODO fork and wait till the child terminates -> the above fn can set a local status field
     let mutex = BorrowMutex::<16, TestObject>::new();
 
     let t1 = async {

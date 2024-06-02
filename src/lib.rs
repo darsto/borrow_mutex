@@ -221,9 +221,6 @@ impl<const M: usize, T: ?Sized> core::fmt::Debug for BorrowMutex<M, T> {
 /// Common part between [`LendGuard`] and [`BorrowGuardUnarmed`]/[`BorrowGuardArmed`].
 /// This is kept inside the [`BorrowMutex`]'s MPMC until it can be safely
 /// dropped.
-///
-/// TODO: This is currently 40bytes on x86_64, but could be 24bytes if we
-/// organized the fields
 struct BorrowMutexRef {
     borrow_waker: AtomicWaker,
     borrow_waker_state: AtomicWakerState,
@@ -383,7 +380,6 @@ pub struct BorrowGuardArmed<'g, T: ?Sized> {
 impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
     /// Equivalent of the std::sync::MutexGuard::map() API which is currently
     /// unstable. This makes a guard for a component of the borrowed data.
-    /// TODO: hide this behind a feature flag?
     pub fn map<U, F>(orig: Self, f: F) -> BorrowGuardArmed<'g, U>
     where
         F: FnOnce(&mut T) -> &mut U,
