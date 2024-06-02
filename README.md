@@ -30,8 +30,8 @@ Still, the [`BorrowMutex`] is Send+Sync and can be safely used from
 any number of threads.
 
 The most common use case is having a state handled entirely in its own
-async context, but occasionally having to be accessed elsewhere -
-in another async context.
+async context, but occasionally having to be accessed from the outside -
+another async context.
 
 Since the shared data doesn't have to be wrapped inside an [`Arc`],
 it doesn't have to be allocated on the heap. In fact, BorrowMutex does not
@@ -39,13 +39,12 @@ perform any allocations whatsoever. The
 [`tests/borrow_basic.rs`](https://github.com/darsto/borrow_mutex/blob/master/tests/borrow_basic.rs)
 presents a simple example where *everything* is stored on the stack.
 
-The API is fully safe and doesn't cause UB under any circumstances, but
-it's not able to enforce all the semantics at compile time. I.e. if a
-lending side of a transaction drops the lending Future before it's
-resolved (before the borrowing side stops using it), the process will
-immediately abort (and print an error message).
+## Safety
 
-The mutex is also sound with any [`core::mem::forget()`].
+The API can be unsound with [`core::mem::forget()`]. For convenience,
+none of the API is marked unsafe. See [`BorrowMutex::lend`] for details.
+Hopefully the unsound code could be prohibited in future rust versions
+with additional compiler annotations.
 
 ## Example
 
@@ -114,38 +113,56 @@ a full working example.
 
 # What if Drop is not called?
 
-**Is BorrowMutex really sound, under all conditions?**
-It should be. I was not able to trigger any undefined behavior with
-safe code.
+Unfortunately, **Undefined Behavior**. With [`core::mem::forget()`] or similar
+called on [`LendGuard`] we can make the borrow checker believe the lended
+`&mut T` is no longer used, while in fact, it is:
 
-The object returned from [`BorrowMutex::lend()`] (that is a [`LendGuard`])
-has a Drop impl that must be called before the &mut value can be usable again.
-If the reference is still borrowed on the borrower side, the program immediately
-aborts (panic is not sufficient). But what about [`core::mem::forget()`]? The
-Guard could be technically forgotten, and the &mut reference could be reused on
-the lender side while it's still used on the borrowstd::sync::er side. That
-would be unsound, and cause immediate undefined behavior. Similar Rust libraries
-make their API unsafe exactly because of this reason - it's the caller's
-responsibility to not call [`core::mem::forget()`] or similar
+```rust,should_panic
+# use borrow_mutex::BorrowMutex;
+# use futures::Future;
+# use futures::task::Context;
+# use futures::task::Poll;
+# use core::pin::pin;
+struct TestStruct {
+    counter: usize,
+}
+let mutex = BorrowMutex::<16, TestStruct>::new();
+let mut test = TestStruct { counter: 1 };
+
+let mut test_borrow = pin!(mutex.request_borrow());
+let _ = test_borrow
+    .as_mut()
+    .poll(&mut Context::from_waker(&futures::task::noop_waker()));
+
+let mut t1 = Box::pin(async {
+    mutex.lend(&mut test).unwrap().await;
+});
+
+let _ = t1
+    .as_mut()
+    .poll(&mut Context::from_waker(&futures::task::noop_waker()));
+std::mem::forget(t1);
+// the compiler thinks `test` is no longer borrowed, but in fact it is
+
+let Poll::Ready(Ok(mut test_borrow)) = test_borrow
+    .as_mut()
+    .poll(&mut Context::from_waker(&futures::task::noop_waker()))
+else {
+    panic!();
+};
+
+// now we get two mutable references, this is strictly UB
+test_borrow.counter = 2;
+test.counter = 6;
+assert_eq!(test_borrow.counter, 2); // this fails
+```
+
+Similar Rust libraries make their API unsafe exactly because of this reason -
+it's the caller's responsibility to not call [`core::mem::forget()`] or similar
 ([async-scoped](https://docs.rs/async-scoped/0.9.0/async_scoped/struct.Scope.html#method.scope))
 
-[`BorrowMutex`] doesn't have any unsafe APIs. [`core::mem::forget()`] can be
-called on the [`LendGuard`] and is perfectly sound. That's because
-the borrower doesn't obtain the &mut reference until the [`LendGuard`]
-is polled. We have two scenarios:
-- With [`LendGuard`] dropped without ever polling it, the [`BorrowMutex`] is
-hardly usable and will abort on the next [`BorrowMutex::lend()`] call
-(multiple lended values), but no undefined behavior can be observed.
-- To poll the Guard once and drop it later it needs to be manually pinned first.
-This can be implicitly via .await (which also polls to completion/cancellation,
-so is out of this consideration) or explicitly pinned with [`core::pin::pin!()`].
-The [`core::pin::Pin<&mut LendGuard>`] can be forgotten this way - but this
-still Drops the original LendGuard and there's no way to prevent that with
-only safe code. The [`LendGuard`] is !Unpin exactly for this reason.
-
-To expand on that second case, see a similar discussion at
-<https://github.com/imxrt-rs/imxrt-hal/issues/137> and a
-[code snippet linked inside](https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=79e34e7c3e968f8f6680a7cd08d1ffc4)
+However, this Undefined Behavior is really difficult to trigger in normal
+code without explicit singular `poll()`-s.
 
 [`Arc`]: std::sync::Arc
 [`Mutex`]: std::sync::Mutex

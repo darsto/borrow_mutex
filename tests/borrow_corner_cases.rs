@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 
-use std::{sync::Arc, time::Duration};
+use std::{pin::pin, sync::Arc, task::Context, time::Duration};
 
-use futures::FutureExt;
+use futures::{Future, FutureExt};
 use futures_timer::Delay;
 
 use borrow_mutex::BorrowMutex;
@@ -23,6 +23,17 @@ async fn start_lending(mutex: Arc<BorrowMutex<16, TestObject>>) {
 fn borrow_basic_immediate_drop() {
     let mutex = Arc::new(BorrowMutex::<16, TestObject>::new());
     let t1_mutex = mutex.clone();
+
+    {
+        let mut normal_borrow = pin!(mutex.request_borrow());
+        let _ = normal_borrow
+            .as_mut()
+            .poll(&mut Context::from_waker(&futures::task::noop_waker()));
+        let mut obj = TestObject;
+        let immediate_lend_drop = mutex.lend(&mut obj).unwrap();
+        drop(immediate_lend_drop);
+    }
+
     let _t1 = std::thread::spawn(move || {
         futures::executor::block_on(async move {
             start_lending(t1_mutex).await;

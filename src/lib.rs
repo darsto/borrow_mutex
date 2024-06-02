@@ -113,6 +113,19 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// immediately return None). It is recommended to first call
     /// [`BorrowMutex::wait_to_lend()`].
     ///
+    /// On successful lend, a [`LendGuard`] future is returned which:
+    ///  - can be immediately dropped, which makes the whole operation invisible
+    ///    to the borrower - it will keep waiting for another lender
+    ///  - or, can be polled, and then dropped only once it resolves (to nothing).
+    ///
+    /// The first poll will awake the borrower. Dropping the [`LendGuard`] before
+    /// it resolves (which implies - before the borrowing side drops its guard)
+    /// will abort the process. Forgetting it via [`core::mem::forget()`] or
+    /// similar cannot be detected at runtime, and may allow **Undefined Behavior**.
+    /// The API should be marked unsafe, but it's not. Hopefully this broken
+    /// behavior could be prohibited in future rust versions with some
+    /// `#[must_drop]` annotation.
+    ///
     /// # Note
     ///
     /// Only one value may be lended to the mutex at a time. Trying to lend
@@ -323,7 +336,8 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
 
         // The borrow_waker turns ready only when wake() is called.
         // There are no spurious wakeups, and this is the only ready poll we get.
-        assert!(self.mutex.lender_lended.load(Ordering::Relaxed));
+        let is_lended = self.mutex.lender_lended.load(Ordering::Acquire);
+        assert!(is_lended);
         // SAFETY: The object remains valid until we unset [`BorrowMutexRef::guard_present`]
         // (which happens at [`BorrowGuardArmed::drop`]).
         let inner_ref = unsafe { *self.mutex.inner_ref.get() }.unwrap();
@@ -471,8 +485,9 @@ impl<'g, 'm: 'g, const M: usize, T: ?Sized> Lender<'m, M, T> {
 /// This structure is created by [`BorrowMutex::lend()`], and is associated
 /// with a certain borrower.
 ///
-/// This structure must be polled to completion before being dropped.
-/// Trying to drop it prematurely will cause the entire process to abort.
+/// This structure can be dropped immediately (without any polling), or can
+/// be polled to completion before being dropped. Trying to drop it
+/// prematurely will cause the entire process to abort.
 ///
 /// On the first poll of [`LendGuard`] the associated [`BorrowGuardUnarmed`]
 /// will resolve (effectively - it will turned armed), and [`LendGuard`] will
@@ -480,9 +495,6 @@ impl<'g, 'm: 'g, const M: usize, T: ?Sized> Lender<'m, M, T> {
 pub struct LendGuard<'l, const M: usize, T: ?Sized> {
     mutex: &'l BorrowMutex<M, T>,
     borrow: &'l BorrowMutexRef,
-    /// Once polled, the LendGuard must have its Drop impl called, so
-    /// effectively forbid core::mem::forget() by making the guard !Unpin
-    /// See README.md "What if Drop is not called?"
     _marker: PhantomPinned,
 }
 
@@ -521,7 +533,8 @@ impl<'m, const M: usize, T: ?Sized> Future for LendGuard<'m, M, T> {
 
 impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
     fn drop(&mut self) {
-        if self.borrow.guard_present.load(Ordering::Acquire) {
+        let guard_present = self.borrow.guard_present.load(Ordering::Acquire);
+        if self.borrow.ref_acquired.load(Ordering::Relaxed) && guard_present {
             // the mutable reference is about to be re-gained in the lending context while
             // it's still used in the borrowed context. We can't let that happen, and we can't
             // even panic here as this may invalidate the referenced object. If the borrow is
@@ -531,7 +544,9 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
         }
         self.mutex.lender_lended.store(false, Ordering::Relaxed);
         unsafe { *self.mutex.inner_ref.get() = None };
-        let _ = self.mutex.borrowers.pop().unwrap();
+        if self.borrow.ref_acquired.load(Ordering::Relaxed) {
+            let _ = self.mutex.borrowers.pop().unwrap();
+        }
         // self.borrow should be no longer accessed (it's still valid memory with
         // valid initialized data, but might be reused by someone else now)
         self.mutex.lender_present.store(false, Ordering::Release);
