@@ -41,8 +41,11 @@ presents a simple example where *everything* is stored on the stack.
 
 ## Safety
 
-The API can be unsound with [`core::mem::forget()`]. For convenience,
-none of the API is marked unsafe. See [`BorrowMutex::lend`] for details.
+The API is unsound when futures are forgotten ([`core::mem::forget()`]).
+For convenience, none of the API is marked unsafe.
+
+See [`BorrowMutex::lend`] for details.
+
 Hopefully the unsound code could be prohibited in future rust versions
 with additional compiler annotations.
 
@@ -161,8 +164,8 @@ Similar Rust libraries make their API unsafe exactly because of this reason -
 it's the caller's responsibility to not call [`core::mem::forget()`] or similar
 ([async-scoped](https://docs.rs/async-scoped/0.9.0/async_scoped/struct.Scope.html#method.scope))
 
-However, this Undefined Behavior is really difficult to trigger in normal
-code without explicit singular `poll()`-s.
+However, this Undefined Behavior is really difficult to trigger in regular
+code. It's hardly useful to call [`core::mem::forget()`] on a future.
 
 [`Arc`]: std::sync::Arc
 [`Mutex`]: std::sync::Mutex
