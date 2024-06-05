@@ -211,8 +211,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     }
 }
 
-unsafe impl<const M: usize, T: ?Sized> Send for BorrowMutex<M, T> {}
-unsafe impl<const M: usize, T: ?Sized> Sync for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T: ?Sized + Send> Send for BorrowMutex<M, T> {}
+unsafe impl<const M: usize, T: ?Sized + Send> Sync for BorrowMutex<M, T> {}
 
 impl<const M: usize, T: ?Sized> Default for BorrowMutex<M, T> {
     fn default() -> Self {
@@ -368,7 +368,7 @@ impl<'m, const M: usize, T: ?Sized> Drop for BorrowGuardUnarmed<'m, M, T> {
     }
 }
 
-unsafe impl<'m, const M: usize, T: ?Sized> Send for BorrowGuardUnarmed<'m, M, T> {}
+unsafe impl<'m, const M: usize, T: ?Sized + Send> Send for BorrowGuardUnarmed<'m, M, T> {}
 
 /// An RAII implementation of a "scoped lock" of a mutex. This is an armed
 /// variant which provides access to the lended value via its [`Deref`] and
@@ -392,7 +392,7 @@ pub struct BorrowGuardArmed<'g, T: ?Sized> {
 impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
     /// Equivalent of the std::sync::MutexGuard::map() API which is currently
     /// unstable. This makes a guard for a component of the borrowed data.
-    pub fn map<U, F>(orig: Self, f: F) -> BorrowGuardArmed<'g, U>
+    pub fn map<U: ?Sized, F>(orig: Self, f: F) -> BorrowGuardArmed<'g, U>
     where
         F: FnOnce(&mut T) -> &mut U,
     {
@@ -428,10 +428,8 @@ impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
     }
 }
 
-unsafe impl<'m, T: ?Sized> Send for BorrowGuardArmed<'m, T> {}
-/// An armed guard could be used to obtain multiple immutable references, so it makes
-/// some sense to impl Sync.
-unsafe impl<'m, T: ?Sized> Sync for BorrowGuardArmed<'m, T> {}
+unsafe impl<'m, T: ?Sized + Send> Send for BorrowGuardArmed<'m, T> {}
+unsafe impl<'m, T: ?Sized + Sync> Sync for BorrowGuardArmed<'m, T> {}
 
 /// A Future of the [`BorrowMutex`] which resolves as soon as any borrow request
 /// is pending.
@@ -551,7 +549,7 @@ impl<'l, const M: usize, T: ?Sized> Drop for LendGuard<'l, M, T> {
     }
 }
 
-unsafe impl<'l, const M: usize, T: ?Sized> Send for LendGuard<'l, M, T> {}
+unsafe impl<'l, const M: usize, T: ?Sized + Send> Send for LendGuard<'l, M, T> {}
 
 #[cfg(feature = "std")]
 static ABORT_FN: AtomicPtr<fn() -> !> = AtomicPtr::new(std::process::abort as *mut _);

@@ -96,7 +96,7 @@ fn borrow_dyn_single_thread() {
 
 #[test]
 fn borrow_dyn_multi_thread() {
-    let mutex = Arc::new(BorrowMutex::<16, dyn Any>::new());
+    let mutex = Arc::new(BorrowMutex::<16, dyn Any + Send>::new());
 
     let f1_mutex = mutex.clone();
     let f1 = move || {
@@ -114,7 +114,7 @@ fn borrow_dyn_multi_thread() {
                         println!("t1: counter: {}", test.counter);
                     }
                     _ = f1_mutex.wait_to_lend().fuse() => {
-                        f1_mutex.lend(&mut test as &mut dyn Any).unwrap().await
+                        f1_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
@@ -142,7 +142,7 @@ fn borrow_dyn_multi_thread() {
                         assert_eq!(test.is_even, test.another_counter % 2 == 0);
                     }
                     _ = f2_mutex.wait_to_lend().fuse() => {
-                        f2_mutex.lend(&mut test as &mut dyn Any).unwrap().await
+                        f2_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
@@ -178,7 +178,7 @@ fn borrow_dyn_multi_thread() {
 
 #[test]
 fn borrow_dyn_multi_thread_multi_borrow() {
-    let mutex = Arc::new(BorrowMutex::<16, dyn Any>::new());
+    let mutex = Arc::new(BorrowMutex::<16, dyn Any + Send>::new());
 
     let f1_mutex = mutex.clone();
     let f1 = move || {
@@ -196,7 +196,7 @@ fn borrow_dyn_multi_thread_multi_borrow() {
                         println!("t1: counter: {}", test.counter);
                     }
                     _ = f1_mutex.wait_to_lend().fuse() => {
-                        f1_mutex.lend(&mut test as &mut dyn Any).unwrap().await
+                        f1_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
@@ -224,7 +224,7 @@ fn borrow_dyn_multi_thread_multi_borrow() {
                         assert_eq!(test.is_even, test.another_counter % 2 == 0);
                     }
                     _ = f2_mutex.wait_to_lend().fuse() => {
-                        f2_mutex.lend(&mut test as &mut dyn Any).unwrap().await
+                        f2_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
