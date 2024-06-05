@@ -134,9 +134,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// Trying to lend after a mutex was terminated ([`BorrowMutex::terminate()`])
     /// will also abort the process.
     pub fn lend<'g, 'm: 'g>(&'m self, value: &'g mut T) -> Option<LendGuard<'g, M, T>> {
-        // Release ordering is only used to effectively synchronize any caller's
-        // access to the shared memory
-        if self.lender_present.swap(true, Ordering::AcqRel) {
+        if self.lender_present.swap(true, Ordering::Acquire) {
             // we could return None, but this would be ill-advised to try to
             // handle it. The rest of error handling uses abort(), so do the
             // same here for consistency.
