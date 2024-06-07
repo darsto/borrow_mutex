@@ -5,16 +5,21 @@
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
+use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[repr(C)]
 pub struct MPMC<const S: usize, T> {
     prod_head: AtomicUsize,
     prod_tail: AtomicUsize,
     cons_head: AtomicUsize,
     cons_tail: AtomicUsize,
+    size: usize,
     ring: [UnsafeCell<MaybeUninit<T>>; S],
 }
+
+pub struct MPMCRef<'a, T>(*const MPMC<0, T>, PhantomData<&'a T>);
 
 impl<const S: usize, T> MPMC<S, T> {
     pub const fn new() -> Self {
@@ -27,34 +32,92 @@ impl<const S: usize, T> MPMC<S, T> {
             prod_tail: AtomicUsize::new(0),
             cons_head: AtomicUsize::new(0),
             cons_tail: AtomicUsize::new(0),
+            size: S,
             // uninitialized memory won't be accessed
             #[allow(clippy::uninit_assumed_init)]
             ring: unsafe { MaybeUninit::uninit().assume_init() },
         }
     }
 
+    #[inline]
+    pub fn as_ptr(&self) -> MPMCRef<'_, T> {
+        unsafe { MPMCRef::from_ptr(self) }
+    }
+
+    #[inline]
     pub fn capacity(&self) -> usize {
         S - 1
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.as_ptr().len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.as_ptr().is_empty()
+    }
+
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.as_ptr().is_full()
+    }
+
+    #[inline]
+    pub fn push(&self, val: T) -> Result<&UnsafeCell<T>, T> {
+        self.as_ptr().push(val)
+    }
+
+    #[inline]
+    pub fn pop(&self) -> Option<T> {
+        self.as_ptr().pop()
+    }
+
+    #[inline]
+    pub fn peek(&self) -> Option<&UnsafeCell<T>> {
+        self.as_ptr().peek()
+    }
+}
+
+impl<'a, T> MPMCRef<'a, T> {
+    pub unsafe fn from_ptr<const S: usize>(ptr: *const MPMC<S, T>) -> MPMCRef<'a, T> {
+        MPMCRef(ptr as *const _ as *const MPMC<0, T>, PhantomData)
+    }
+
+    #[inline]
+    fn ring(&self) -> &[UnsafeCell<MaybeUninit<T>>] {
+        let ring_ptr = unsafe {
+            self.0
+                .cast::<u8>()
+                .add(std::mem::offset_of!(MPMC<0, T>, ring))
+        } as *const UnsafeCell<MaybeUninit<T>>;
+        unsafe { core::slice::from_raw_parts(ring_ptr, self.size) }
+    }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.size - 1
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         let prod_tail = self.prod_tail.load(Ordering::Acquire);
         let cons_tail = self.cons_tail.load(Ordering::Acquire);
-        //println!("len, prod_tail={prod_tail}, cons_tail={cons_tail}");
-        // in case of intermediate update the calculated length won't ever be >= capacity
-
         (prod_tail - cons_tail) & self.capacity()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[inline]
     pub fn is_full(&self) -> bool {
         self.len() == self.capacity()
     }
 
-    pub fn push(&self, val: T) -> Result<&UnsafeCell<T>, T> {
+    pub fn push(&self, val: T) -> Result<&'a UnsafeCell<T>, T> {
         let mut head = self.prod_head.load(Ordering::Acquire);
 
         // reserve an index for the element
@@ -77,7 +140,7 @@ impl<const S: usize, T> MPMC<S, T> {
         }
 
         // memcpy
-        let slot = &self.ring[head & (self.capacity())];
+        let slot = &self.ring()[head & (self.capacity())];
         unsafe { (*slot.get()).write(val) };
 
         // mark the enqueue completion
@@ -128,7 +191,7 @@ impl<const S: usize, T> MPMC<S, T> {
         }
 
         // memcpy
-        let slot = &self.ring[head & self.capacity()];
+        let slot = &self.ring()[head & self.capacity()];
         data.write(unsafe { (*slot.get()).assume_init_read() });
 
         // mark the dequeue completion
@@ -154,15 +217,15 @@ impl<const S: usize, T> MPMC<S, T> {
         Some(unsafe { data.assume_init() })
     }
 
-    pub fn peek(&self) -> Option<&UnsafeCell<T>> {
+    #[inline]
+    pub fn peek(&self) -> Option<&'a UnsafeCell<T>> {
         let prod_tail = self.prod_tail.load(Ordering::Acquire);
         let cons_tail = self.cons_tail.load(Ordering::Acquire);
-        //println!("peek, prod_tail={prod_tail}, cons_tail={cons_tail}");
         if prod_tail == cons_tail {
             return None;
         }
 
-        let slot = &self.ring[cons_tail & self.capacity()];
+        let slot = &self.ring()[cons_tail & self.capacity()];
         Some(unsafe { core::intrinsics::transmute(slot) })
     }
 }
@@ -185,3 +248,16 @@ impl<const S: usize, T> core::fmt::Debug for MPMC<S, T> {
 
 unsafe impl<const S: usize, T> Sync for MPMC<S, T> {}
 unsafe impl<const S: usize, T> Send for MPMC<S, T> {}
+
+impl<'a, T> core::ops::Deref for MPMCRef<'a, T> {
+    type Target = MPMC<0, T>;
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.0 }
+    }
+}
+
+impl<'a, T> Clone for MPMCRef<'a, T> {
+    fn clone(&self) -> Self {
+        MPMCRef(self.0, PhantomData)
+    }
+}
