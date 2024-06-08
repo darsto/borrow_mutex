@@ -110,8 +110,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     ///
     /// This can be called concurrently from multiple async contexts but it's
     /// hardly useful this way. See [`BorrowMutex::lend()`] for its limitations.
-    pub fn wait_to_lend<'g, 'm: 'g>(&'m self) -> Lender<'g, T> {
-        Lender {
+    pub fn wait_to_lend<'g, 'm: 'g>(&'m self) -> LendWaiter<'g, T> {
+        LendWaiter {
             mutex: self.as_ptr(),
         }
     }
@@ -472,12 +472,12 @@ unsafe impl<'m, T: ?Sized + Sync> Sync for BorrowGuardArmed<'m, T> {}
 /// is pending.
 ///
 /// This structure is created by [`BorrowMutex::wait_to_lend()`].
-pub struct Lender<'m, T: ?Sized> {
+pub struct LendWaiter<'m, T: ?Sized> {
     mutex: BorrowMutexRef<'m, T>,
 }
 
 // await until there is someone wanting to borrow
-impl<'m, T: ?Sized> Future for Lender<'m, T> {
+impl<'m, T: ?Sized> Future for LendWaiter<'m, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -507,7 +507,7 @@ impl<'m, T: ?Sized> Future for Lender<'m, T> {
     }
 }
 
-unsafe impl<'g, T: ?Sized> Send for Lender<'g, T> {}
+unsafe impl<'g, T: ?Sized> Send for LendWaiter<'g, T> {}
 
 /// An RAII implementation of a "scoped lock" of a lending side of a mutex.
 /// This structure is created by [`BorrowMutex::lend()`], and is associated
