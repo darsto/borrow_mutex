@@ -318,7 +318,8 @@ impl<'g, const M: usize, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, M, T>
         }
 
         // The mutex could've been terminated just after we've pushed to the ring
-        if self.mutex.terminated.load(Ordering::Acquire) {
+        atomic::fence(Ordering::SeqCst);
+        if self.mutex.terminated.load(Ordering::Relaxed) {
             return Poll::Ready(Err(Error::Terminated));
         }
 
