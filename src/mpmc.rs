@@ -6,7 +6,7 @@
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
+use core::mem::{align_of, size_of, MaybeUninit};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[repr(C)]
@@ -78,6 +78,15 @@ impl<const S: usize, T> MPMC<S, T> {
     pub fn peek(&self) -> Option<&UnsafeCell<T>> {
         self.as_ptr().peek()
     }
+
+    /// Equivalent of core::mem::offset_of!(.., ring) that works
+    /// in rust version pre-1.77.
+    const fn ring_offset() -> usize {
+        let offset = size_of::<AtomicUsize>() * 4 + size_of::<usize>();
+
+        let align = align_of::<[UnsafeCell<MaybeUninit<T>>; 2]>();
+        (offset + align - 1) & !(align - 1)
+    }
 }
 
 impl<'a, T> MPMCRef<'a, T> {
@@ -87,11 +96,8 @@ impl<'a, T> MPMCRef<'a, T> {
 
     #[inline]
     fn ring(&self) -> &[UnsafeCell<MaybeUninit<T>>] {
-        let ring_ptr = unsafe {
-            self.0
-                .cast::<u8>()
-                .add(std::mem::offset_of!(MPMC<0, T>, ring))
-        } as *const UnsafeCell<MaybeUninit<T>>;
+        let ring_ptr = unsafe { self.0.cast::<u8>().add(MPMC::<0, T>::ring_offset()) }
+            as *const UnsafeCell<MaybeUninit<T>>;
         unsafe { core::slice::from_raw_parts(ring_ptr, self.size) }
     }
 
@@ -259,5 +265,23 @@ impl<'a, T> core::ops::Deref for MPMCRef<'a, T> {
 impl<'a, T> Clone for MPMCRef<'a, T> {
     fn clone(&self) -> Self {
         MPMCRef(self.0, PhantomData)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MPMC;
+
+    #[test]
+    fn validate_ring_field_offset() {
+        assert_eq!(
+            MPMC::<0, usize>::ring_offset(),
+            core::mem::offset_of!(MPMC<0, usize>, ring)
+        );
+
+        assert_eq!(
+            MPMC::<0, &dyn core::any::Any>::ring_offset(),
+            core::mem::offset_of!(MPMC<0, &dyn core::any::Any>, ring)
+        );
     }
 }

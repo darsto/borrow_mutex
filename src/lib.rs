@@ -16,9 +16,9 @@ compile_error!("no_std version of this crate requires panic = abort to ensure sa
 use core::cell::UnsafeCell;
 use core::future::Future;
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::ManuallyDrop;
+use core::mem::{align_of, size_of, ManuallyDrop};
 use core::pin::Pin;
-use core::ptr::null_mut;
+use core::ptr::{null_mut, NonNull};
 use core::sync::atomic::{self, AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use core::task::{Context, Poll};
 
@@ -49,7 +49,7 @@ mod atomic_waker;
 /// [`Mutex`]: std::sync::Mutex
 #[repr(C)]
 pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
-    inner_ref: UnsafeCell<Option<*mut T>>,
+    inner_ref: UnsafeCell<Option<NonNull<T>>>,
     lend_waiter: AtomicWaker,
     lend_waiter_state: AtomicWakerState,
     state: AtomicU8,
@@ -165,7 +165,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
 
         // SAFETY: We're the only ones writing this value and [`BorrowMutex::lender_lended`]
         // atomic makes sure no one is currently reading it
-        unsafe { *self.inner_ref.get() = Some(value) };
+        unsafe { *self.inner_ref.get() = Some(NonNull::from(value)) };
         self.state
             .store(LendState::Lending as u8, Ordering::Release);
 
@@ -228,6 +228,18 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             // dropping the lend_guard shall pop the borrow-er from the queue
         }
     }
+
+    /// Equivalent of core::mem::offset_of!(.., borrowers) that works
+    /// in rust version pre-1.77.
+    const fn borrowers_offset() -> usize {
+        let offset = size_of::<UnsafeCell<Option<NonNull<T>>>>()
+            + size_of::<AtomicWaker>()
+            + size_of::<AtomicWakerState>()
+            + size_of::<AtomicU8>();
+
+        let align = align_of::<MPMC<M, BorrowRef>>();
+        (offset + align - 1) & !(align - 1)
+    }
 }
 
 unsafe impl<const M: usize, T: ?Sized + Send> Send for BorrowMutex<M, T> {}
@@ -259,7 +271,7 @@ impl<'a, T: ?Sized> BorrowMutexRef<'a, T> {
             MPMCRef::from_ptr(
                 self.0
                     .cast::<u8>()
-                    .add(core::mem::offset_of!(BorrowMutex<0, T>, borrowers))
+                    .add(BorrowMutex::<0, T>::borrowers_offset())
                     as *const MPMC<0, BorrowRef>,
             )
         }
@@ -433,7 +445,7 @@ unsafe impl<'m, T: ?Sized + Send> Send for BorrowGuardUnarmed<'m, T> {}
 /// [`Deref`]: core::ops::Deref
 /// [`DerefMut`]: core::ops::DerefMut
 pub struct BorrowGuardArmed<'g, T: ?Sized> {
-    inner_ref: *mut T,
+    inner_ref: NonNull<T>,
     mutex: BorrowMutexRef<'g, T>,
     inner: &'g BorrowRef,
 }
@@ -445,10 +457,10 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
     where
         F: FnOnce(&mut T) -> &mut U,
     {
-        let inner_ref = f(unsafe { &mut *orig.inner_ref });
+        let inner_ref = f(unsafe { &mut *orig.inner_ref.as_ptr() });
         let orig = ManuallyDrop::new(orig);
         BorrowGuardArmed {
-            inner_ref,
+            inner_ref: NonNull::from(inner_ref),
             mutex: unsafe { core::mem::transmute(orig.mutex.clone()) },
             inner: orig.inner,
         }
@@ -458,13 +470,13 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
 impl<'g, T: ?Sized> core::ops::Deref for BorrowGuardArmed<'g, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.inner_ref }
+        unsafe { self.inner_ref.as_ref() }
     }
 }
 
 impl<'g, T: ?Sized> core::ops::DerefMut for BorrowGuardArmed<'g, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.inner_ref }
+        unsafe { self.inner_ref.as_mut() }
     }
 }
 
@@ -619,5 +631,23 @@ fn abort(msg: &str) -> ! {
     #[cfg(not(feature = "std"))]
     {
         panic!("{msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BorrowMutex;
+
+    #[test]
+    fn validate_borrowers_field_offset() {
+        assert_eq!(
+            BorrowMutex::<0, usize>::borrowers_offset(),
+            core::mem::offset_of!(BorrowMutex<0, usize>, borrowers)
+        );
+
+        assert_eq!(
+            BorrowMutex::<0, &dyn core::any::Any>::borrowers_offset(),
+            core::mem::offset_of!(BorrowMutex<0, &dyn core::any::Any>, borrowers)
+        );
     }
 }
