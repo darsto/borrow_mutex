@@ -50,7 +50,7 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
                 Poll::Pending
             }
         }
-        REGISTERING => {
+        prev if prev & REGISTERING != 0 => {
             // another poll_const() is underway. There's no good way to handle
             // it and it's not the expected functionality, so just return
             // Poll::Pending. Once the other poll is finished it will unset
