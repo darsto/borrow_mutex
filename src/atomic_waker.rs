@@ -28,17 +28,15 @@ const AWOKEN: u8 = 0b100;
 pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &Waker) -> Poll<()> {
     match state.fetch_or(REGISTERING, Acquire) {
         IDLING => {
-            // SAFETY: We've set the REGISTERING bit, so we're the only ones accessing
-            // the waker now
-            let atomic_waker = unsafe { &mut *atomic_waker.get() };
             // Store the new waker, but avoid storing if the old waker
             // is good enough - meaning it would already wake enough
-            match atomic_waker {
+            //
+            // SAFETY: We've set the REGISTERING bit, so we're the only ones accessing
+            // the waker now
+            match unsafe { &mut *atomic_waker.get() } {
                 Some(old_waker) if old_waker.will_wake(waker) => (),
-                _ => *atomic_waker = Some(waker.clone()),
+                new_waker => *new_waker = Some(waker.clone()),
             }
-            #[allow(dropping_references)]
-            drop(atomic_waker);
 
             let prev = state.swap(IDLING, AcqRel);
             // wake() could have been called just before setting the actual
@@ -57,10 +55,20 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
             // the REGISTERING flag
             Poll::Pending
         }
-        prev => {
-            debug_assert!(prev == WAKING || prev == AWOKEN || prev == WAKING | AWOKEN);
-            // either we've been previously awoken, or wake() is still being called.
+        prev if prev & AWOKEN != 0 => {
+            debug_assert!(prev == AWOKEN || prev == WAKING | AWOKEN);
             state.store(IDLING, Release);
+            Poll::Ready(())
+        }
+        prev => {
+            debug_assert!(prev == WAKING);
+            // We're about to be awoken, but we haven't necessarily stored
+            // our waker yet and we won't be polled again. We have to return
+            // Ready now, but also make sure to now return Ready multiple
+            // times from a single wake - for that reason we have a wait
+            while state.load(Acquire) & AWOKEN != 0 {
+                core::hint::spin_loop();
+            }
             Poll::Ready(())
         }
     }
@@ -74,13 +82,14 @@ pub fn wake(atomic_waker: &AtomicWaker, state: &AtomicWakerState) {
             // SAFETY: we've set the WAKING bit, so we're the only ones
             // accessing the waker now
             let waker = unsafe { (*atomic_waker.get()).take() };
+            // transition to the next state. Any poll triggered before
+            // is currently blocked and just waits for us.
+            state.store(AWOKEN, Release);
             if let Some(waker) = waker {
+                // wake the waker - it might be a spurious wake, but it
+                // won't cause any harm
                 waker.wake();
             }
-            // transition to the next state but only if there wasn't any
-            // REGISTERING in the meantime - if so, it will properly see
-            // our WAKING bit and handle the rest
-            let _ = state.compare_exchange(WAKING, AWOKEN, AcqRel, Acquire);
         }
         _ => {
             // the waker is already awake or the registering is underway
