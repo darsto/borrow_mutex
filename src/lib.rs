@@ -599,9 +599,12 @@ impl<'l, T: ?Sized> Drop for LendGuard<'l, T> {
         }
         // self.borrow should be no longer accessed (it's still valid memory with
         // valid initialized data, but might be reused by someone else now)
-        self.mutex
-            .state
-            .store(LendState::None as u8, Ordering::Release);
+        let _ = self.mutex.state.compare_exchange(
+            LendState::Lending as u8,
+            LendState::None as u8,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
     }
 }
 
