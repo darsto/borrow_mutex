@@ -9,7 +9,7 @@
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::AtomicU8;
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use core::task::Poll;
 use core::task::Waker;
 
@@ -66,7 +66,7 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
             // our waker yet and we won't be polled again. We have to return
             // Ready now, but also make sure to now return Ready multiple
             // times from a single wake - for that reason we have a wait
-            while state.load(Acquire) & AWOKEN != 0 {
+            while state.load(Relaxed) & AWOKEN != 0 {
                 core::hint::spin_loop();
             }
             Poll::Ready(())
