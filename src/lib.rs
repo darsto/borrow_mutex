@@ -403,9 +403,19 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
         // (which happens at [`BorrowGuardArmed::drop`]).
         let inner_ref = unsafe { *self.mutex.inner_ref.get() }.unwrap();
         self.terminated.store(true, Ordering::Relaxed);
+        // SAFETY: Rust binds those references to &self lifetime and doesn't let
+        // us return them from the function, but we know self.mutex lives long
+        // enough - the returned guard has the same lifetime
+        let (lend_waiter, lend_waiter_state) = unsafe {
+            (
+                std::mem::transmute(&self.mutex.lend_waiter),
+                std::mem::transmute(&self.mutex.lend_waiter_state),
+            )
+        };
         Poll::Ready(Ok(BorrowGuardArmed {
             inner_ref,
-            mutex: self.mutex.clone(),
+            lend_waiter,
+            lend_waiter_state,
             inner,
         }))
     }
@@ -446,7 +456,8 @@ unsafe impl<'m, T: ?Sized + Send> Send for BorrowGuardUnarmed<'m, T> {}
 /// [`DerefMut`]: core::ops::DerefMut
 pub struct BorrowGuardArmed<'g, T: ?Sized> {
     inner_ref: NonNull<T>,
-    mutex: BorrowMutexRef<'g, T>,
+    lend_waiter: &'g AtomicWaker,
+    lend_waiter_state: &'g AtomicWakerState,
     inner: &'g BorrowRef,
 }
 
@@ -461,7 +472,8 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
         let orig = ManuallyDrop::new(orig);
         BorrowGuardArmed {
             inner_ref: NonNull::from(inner_ref),
-            mutex: unsafe { core::mem::transmute(orig.mutex.clone()) },
+            lend_waiter: orig.lend_waiter,
+            lend_waiter_state: orig.lend_waiter_state,
             inner: orig.inner,
         }
     }
@@ -484,7 +496,7 @@ impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
     fn drop(&mut self) {
         self.inner.guard_present.store(false, Ordering::Release);
         // self.inner is no longer valid
-        atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
+        atomic_waker::wake(self.lend_waiter, self.lend_waiter_state);
     }
 }
 
