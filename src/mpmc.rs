@@ -255,14 +255,14 @@ impl<const S: usize, T> core::fmt::Debug for MPMC<S, T> {
 unsafe impl<const S: usize, T> Sync for MPMC<S, T> {}
 unsafe impl<const S: usize, T> Send for MPMC<S, T> {}
 
-impl<'a, T> core::ops::Deref for MPMCRef<'a, T> {
+impl<T> core::ops::Deref for MPMCRef<'_, T> {
     type Target = MPMC<0, T>;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.0 }
     }
 }
 
-impl<'a, T> Clone for MPMCRef<'a, T> {
+impl<T> Clone for MPMCRef<'_, T> {
     fn clone(&self) -> Self {
         MPMCRef(self.0, PhantomData)
     }

@@ -264,7 +264,7 @@ impl<const M: usize, T: ?Sized> core::fmt::Debug for BorrowMutex<M, T> {
 /// For internal use only.
 struct BorrowMutexRef<'a, T: ?Sized>(*const BorrowMutex<0, T>, PhantomData<&'a T>);
 
-impl<'a, T: ?Sized> BorrowMutexRef<'a, T> {
+impl<T: ?Sized> BorrowMutexRef<'_, T> {
     #[inline]
     fn borrowers(&self) -> MPMCRef<'_, BorrowRef> {
         unsafe {
@@ -278,14 +278,14 @@ impl<'a, T: ?Sized> BorrowMutexRef<'a, T> {
     }
 }
 
-impl<'a, T: ?Sized> core::ops::Deref for BorrowMutexRef<'a, T> {
+impl<T: ?Sized> core::ops::Deref for BorrowMutexRef<'_, T> {
     type Target = BorrowMutex<0, T>;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.0 }
     }
 }
 
-impl<'a, T: ?Sized> Clone for BorrowMutexRef<'a, T> {
+impl<T: ?Sized> Clone for BorrowMutexRef<'_, T> {
     fn clone(&self) -> Self {
         BorrowMutexRef(self.0, PhantomData)
     }
@@ -421,7 +421,7 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
     }
 }
 
-impl<'m, T: ?Sized> Drop for BorrowGuardUnarmed<'m, T> {
+impl<T: ?Sized> Drop for BorrowGuardUnarmed<'_, T> {
     fn drop(&mut self) {
         if !self.terminated.load(Ordering::Relaxed) {
             let ref_ptr = self.inner.load(Ordering::Relaxed);
@@ -440,7 +440,7 @@ impl<'m, T: ?Sized> Drop for BorrowGuardUnarmed<'m, T> {
     }
 }
 
-unsafe impl<'m, T: ?Sized + Send> Send for BorrowGuardUnarmed<'m, T> {}
+unsafe impl<T: ?Sized + Send> Send for BorrowGuardUnarmed<'_, T> {}
 
 /// An RAII implementation of a "scoped lock" of a mutex. This is an armed
 /// variant which provides access to the lended value via its [`Deref`] and
@@ -479,20 +479,20 @@ impl<'g, T: ?Sized> BorrowGuardArmed<'g, T> {
     }
 }
 
-impl<'g, T: ?Sized> core::ops::Deref for BorrowGuardArmed<'g, T> {
+impl<T: ?Sized> core::ops::Deref for BorrowGuardArmed<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { self.inner_ref.as_ref() }
     }
 }
 
-impl<'g, T: ?Sized> core::ops::DerefMut for BorrowGuardArmed<'g, T> {
+impl<T: ?Sized> core::ops::DerefMut for BorrowGuardArmed<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.inner_ref.as_mut() }
     }
 }
 
-impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
+impl<T: ?Sized> Drop for BorrowGuardArmed<'_, T> {
     fn drop(&mut self) {
         self.inner.guard_present.store(false, Ordering::Release);
         // self.inner is no longer valid
@@ -500,8 +500,8 @@ impl<'m, T: ?Sized> Drop for BorrowGuardArmed<'m, T> {
     }
 }
 
-unsafe impl<'m, T: ?Sized + Send> Send for BorrowGuardArmed<'m, T> {}
-unsafe impl<'m, T: ?Sized + Sync> Sync for BorrowGuardArmed<'m, T> {}
+unsafe impl<T: ?Sized + Send> Send for BorrowGuardArmed<'_, T> {}
+unsafe impl<T: ?Sized + Sync> Sync for BorrowGuardArmed<'_, T> {}
 
 /// A Future of the [`BorrowMutex`] which resolves as soon as any borrow request
 /// is pending.
@@ -512,7 +512,7 @@ pub struct LendWaiter<'m, T: ?Sized> {
 }
 
 // await until there is someone wanting to borrow
-impl<'m, T: ?Sized> Future for LendWaiter<'m, T> {
+impl<T: ?Sized> Future for LendWaiter<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -542,7 +542,7 @@ impl<'m, T: ?Sized> Future for LendWaiter<'m, T> {
     }
 }
 
-unsafe impl<'g, T: ?Sized> Send for LendWaiter<'g, T> {}
+unsafe impl<T: ?Sized> Send for LendWaiter<'_, T> {}
 
 /// An RAII implementation of a "scoped lock" of a lending side of a mutex.
 /// This structure is created by [`BorrowMutex::lend()`], and is associated
@@ -562,7 +562,7 @@ pub struct LendGuard<'l, T: ?Sized> {
 }
 
 // await until the (first available) borrower acquires and then drops the BorrowMutexGuard
-impl<'m, T: ?Sized> Future for LendGuard<'m, T> {
+impl<T: ?Sized> Future for LendGuard<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -594,7 +594,7 @@ impl<'m, T: ?Sized> Future for LendGuard<'m, T> {
     }
 }
 
-impl<'l, T: ?Sized> Drop for LendGuard<'l, T> {
+impl<T: ?Sized> Drop for LendGuard<'_, T> {
     fn drop(&mut self) {
         let guard_present = self.borrow.guard_present.load(Ordering::Acquire);
         if self.borrow.ref_acquired.load(Ordering::Relaxed) && guard_present {
@@ -620,7 +620,7 @@ impl<'l, T: ?Sized> Drop for LendGuard<'l, T> {
     }
 }
 
-unsafe impl<'l, T: ?Sized + Send> Send for LendGuard<'l, T> {}
+unsafe impl<T: ?Sized + Send> Send for LendGuard<'_, T> {}
 
 #[cfg(feature = "std")]
 static ABORT_FN: AtomicPtr<fn() -> !> = AtomicPtr::new(std::process::abort as *mut _);
