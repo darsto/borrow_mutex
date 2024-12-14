@@ -110,7 +110,7 @@ impl<'a, T> MPMCRef<'a, T> {
     pub fn len(&self) -> usize {
         let prod_tail = self.prod_tail.load(Ordering::Acquire);
         let cons_tail = self.cons_tail.load(Ordering::Acquire);
-        (prod_tail - cons_tail) & self.capacity()
+        prod_tail.wrapping_sub(cons_tail) & self.capacity()
     }
 
     #[inline]
@@ -130,7 +130,7 @@ impl<'a, T> MPMCRef<'a, T> {
         loop {
             let tail = self.cons_tail.load(Ordering::Acquire);
 
-            if self.capacity().wrapping_add(tail.wrapping_sub(head)) == 0 {
+            if head.wrapping_sub(tail) & self.capacity() == self.capacity() {
                 return Err(val);
             }
 
@@ -146,7 +146,7 @@ impl<'a, T> MPMCRef<'a, T> {
         }
 
         // memcpy
-        let slot = &self.ring()[head & (self.capacity())];
+        let slot = &self.ring()[head & self.capacity()];
         unsafe { (*slot.get()).write(val) };
 
         // mark the enqueue completion
