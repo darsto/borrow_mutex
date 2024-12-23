@@ -25,7 +25,7 @@ fn borrow_basic_immediate_drop() {
     let t1_mutex = mutex.clone();
 
     {
-        let mut normal_borrow = pin!(mutex.request_borrow());
+        let mut normal_borrow = pin!(mutex.borrow());
         let _ = normal_borrow
             .as_mut()
             .poll(&mut Context::from_waker(&futures::task::noop_waker()));
@@ -47,27 +47,27 @@ fn borrow_basic_immediate_drop() {
             _ = Delay::new(Duration::from_millis(300)).fuse() => {
                 Err(())
             }
-            _ = mutex.request_borrow().fuse() => {
+            _ = mutex.borrow().fuse() => {
                 Ok(())
             }
         };
         assert!(normal_borrow.is_ok());
         println!("normal_borrow ok");
 
-        let immediate_drop = mutex.request_borrow();
+        let immediate_drop = mutex.borrow();
         drop(immediate_drop);
         println!("immediate_drop ok");
 
-        let normal_drop = mutex.request_borrow().await.unwrap();
+        let normal_drop = mutex.borrow().await.unwrap();
         drop(normal_drop);
         println!("normal_drop ok");
 
-        let normal_borrow = mutex.request_borrow().await.unwrap();
+        let normal_borrow = mutex.borrow().await.unwrap();
         let forever_pending_borrow_res = futures::select! {
             _ = Delay::new(Duration::from_millis(300)).fuse() => {
                 Err(())
             }
-            borrow = mutex.request_borrow().fuse() => {
+            borrow = mutex.borrow().fuse() => {
                 Ok(borrow)
             }
         };
@@ -79,7 +79,7 @@ fn borrow_basic_immediate_drop() {
             _ = Delay::new(Duration::from_millis(300)).fuse() => {
                 Err(())
             }
-            _ = mutex.request_borrow().fuse() => {
+            _ = mutex.borrow().fuse() => {
                 Ok(())
             }
         };

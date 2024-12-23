@@ -41,7 +41,7 @@ mod atomic_waker;
 /// This lets us share any mutable object between distinct async contexts
 /// without [`Arc`]<[`Mutex`]> over the object in question and without relying
 /// on any kind of internal mutability. It's mostly aimed at single-threaded
-/// executors where internal mutability is an unnecessary complication.
+/// executors where internal mutability is unnecessary complication.
 /// Still, the [`BorrowMutex`] is Send+Sync and can be safely used from
 /// any number of threads.
 ///
@@ -79,12 +79,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
     }
 
-    #[inline]
-    fn as_ptr(&self) -> BorrowMutexRef<'_, T> {
-        BorrowMutexRef(self as *const _ as *const BorrowMutex<0, T>, PhantomData)
-    }
-
-    /// Retrieve a Future that resolves when a reference is lended.
+    /// Obtain a mutable reference. The returned [`BorrowGuardUnarmed`] is
+    /// a future that resolves after [`BorrowMutex::lend()`] is called.
     /// Specifically, it resolves to [`Result`]<[`BorrowGuardArmed`], [`Error`]>.
     ///
     /// The error can be:
@@ -97,11 +93,9 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// A borrow guard which was lended to must be dropped to allow further
     /// borrows to happen.
     ///
-    /// Also see [`BorrowMutex::lend()`].
-    ///
     /// [`MAX_BORROWERS`]: Self::MAX_BORROWERS
     /// [`Error`]: enum@crate::Error
-    pub fn request_borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, T> {
+    pub fn borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, T> {
         BorrowGuardUnarmed {
             mutex: self.as_ptr(),
             inner: AtomicPtr::new(null_mut()),
@@ -109,12 +103,14 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
     }
 
-    /// Retrieve a Future that resolves as soon as any borrow request is pending.
+    /// Wait until [`BorrowMutex::borrow()`] is called.
+    /// [`BorrowMutex::lend()`] can be called immediately after.
     ///
     /// # Note
     ///
-    /// This can be called concurrently from multiple async contexts but it's
-    /// hardly useful this way. See [`BorrowMutex::lend()`] for its limitations.
+    /// This can be called concurrently from multiple async contexts but only
+    /// one wait-er is guaranteed to be awoken.
+    /// See [`BorrowMutex::lend()`] for its concurency limitations.
     pub fn wait_to_lend<'g, 'm: 'g>(&'m self) -> LendWaiter<'g, T> {
         LendWaiter {
             mutex: self.as_ptr(),
@@ -229,6 +225,11 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
     }
 
+    #[inline]
+    fn as_ptr(&self) -> BorrowMutexRef<'_, T> {
+        BorrowMutexRef(self as *const _ as *const BorrowMutex<0, T>, PhantomData)
+    }
+
     /// Equivalent of core::mem::offset_of!(.., borrowers) that works
     /// in rust version pre-1.77.
     const fn borrowers_offset() -> usize {
@@ -304,7 +305,7 @@ struct BorrowRef {
 /// An RAII implementation of a "scoped lock" of a mutex. This is an unarmed
 /// variant which is still awaiting a value to be lended.
 ///
-/// This structure is created by the [`BorrowMutex::request_borrow`] method.
+/// This is returned by [`BorrowMutex::borrow()`].
 ///
 /// It doesn't provide any access to the underlying structure yet, and has to
 /// be polled to completion first. It should resolve into an armed

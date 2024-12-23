@@ -51,7 +51,7 @@ fn borrow_basic_double_thread() {
         futures::executor::block_on(async move {
             eprintln!("t2 thread: {:?}", std::thread::current());
 
-            while let Ok(mut test) = t2_mutex.request_borrow().await {
+            while let Ok(mut test) = t2_mutex.borrow().await {
                 test.counter += 1;
                 eprintln!("t2: counter: {}", test.counter);
                 drop(test);
@@ -103,7 +103,7 @@ fn borrow_basic_multi_borrow() {
             futures::executor::block_on(async move {
                 eprintln!("t{n} thread: {:?}", std::thread::current());
 
-                while let Ok(mut test) = t_mutex.request_borrow().await {
+                while let Ok(mut test) = t_mutex.borrow().await {
                     test.counter += 1;
                     eprintln!("t{n}: counter: {}", test.counter);
                     drop(test);

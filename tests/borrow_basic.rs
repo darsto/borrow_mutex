@@ -40,7 +40,7 @@ fn borrow_basic_single_thread() {
     };
 
     let t2 = async {
-        while let Ok(mut test) = mutex.request_borrow().await {
+        while let Ok(mut test) = mutex.borrow().await {
             test.counter += 1;
             println!("t2: counter: {}", test.counter);
             drop(test);
