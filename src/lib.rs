@@ -63,6 +63,7 @@ enum LendState {
     Starting,
     Lending,
     Terminating,
+    Terminated,
 }
 
 impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
@@ -152,7 +153,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             // we could return None, but this would be ill-advised to try to
             // handle it. The rest of error handling uses abort(), so do the
             // same here for consistency.
-            if prev == LendState::Terminating as u8 {
+            if prev == LendState::Terminating as u8 || prev == LendState::Terminated as u8 {
                 abort("BorrowMutex lended to while terminated");
             } else {
                 abort("multiple distinct references lended to a BorrowMutex");
@@ -195,7 +196,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
-            if prev == LendState::Terminating as u8 {
+            if prev == LendState::Terminating as u8 || prev == LendState::Terminated as u8 {
                 return;
             } else {
                 // we can't gracefully proceed now, so abort the entire process
@@ -218,11 +219,14 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
                 _marker: PhantomPinned,
             };
 
-            // self.inner_ref remains null but our [`self.terminated`] shall
+            // self.inner_ref remains null but [`LendState::Terminating`] will
             // prevent any access to it
             lend_guard.await;
             // dropping the lend_guard shall pop the borrow-er from the queue
         }
+
+        self.state
+            .store(LendState::Terminated as u8, Ordering::Release);
     }
 
     #[inline]
@@ -351,7 +355,8 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
     type Output = Result<BorrowGuardArmed<'g, T>, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.mutex.state.load(Ordering::Acquire) == LendState::Terminating as u8 {
+        let state = self.mutex.state.load(Ordering::Acquire);
+        if state == LendState::Terminating as u8 || state == LendState::Terminated as u8 {
             return Poll::Ready(Err(Error::Terminated));
         }
 
@@ -378,28 +383,38 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
             // try to awake any sleeping one
             atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
             self.inner.store(inner.get(), Ordering::Relaxed);
-        }
-
-        // The mutex could've been terminated just after we've pushed to the ring
-        atomic::fence(Ordering::SeqCst);
-        if self.mutex.state.load(Ordering::Relaxed) == LendState::Terminating as u8 {
-            return Poll::Ready(Err(Error::Terminated));
+            // The mutex could've been terminated just after we pushed to the ring
+            atomic::fence(Ordering::SeqCst);
+            let state = self.mutex.state.load(Ordering::Acquire);
+            if state == LendState::Terminating as u8 || state == LendState::Terminated as u8 {
+                return Poll::Ready(Err(Error::Terminated));
+            }
         }
 
         // SAFETY: The object is kept inside the BorrowMutex until the lend guard
         // drops, which can only happen after this borrow guard is dropped. There
         // are no other mutable references to this object, so soundness is preserved
         let inner = unsafe { &*self.inner.load(Ordering::Relaxed) };
-        if atomic_waker::poll_const(&inner.borrow_waker, &inner.borrow_waker_state, cx.waker())
-            == Poll::Pending
-        {
-            return Poll::Pending;
+        loop {
+            match atomic_waker::poll_const(
+                &inner.borrow_waker,
+                &inner.borrow_waker_state,
+                cx.waker(),
+            ) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    let state = self.mutex.state.load(Ordering::Acquire);
+                    if state == LendState::Lending as u8 {
+                        break;
+                    } else if state == LendState::Terminating as u8
+                        || state == LendState::Terminated as u8
+                    {
+                        return Poll::Ready(Err(Error::Terminated));
+                    }
+                }
+            }
         }
 
-        // The borrow_waker turns ready only when wake() is called.
-        // There are no spurious wakeups, and this is the only ready poll we get.
-        let lend_state = self.mutex.state.load(Ordering::Acquire);
-        assert_eq!(lend_state, LendState::Lending as u8);
         // SAFETY: The object remains valid until we unset [`BorrowMutexRef::guard_present`]
         // (which happens at [`BorrowGuardArmed::drop`]).
         let inner_ref = unsafe { *self.mutex.inner_ref.get() }.unwrap();
