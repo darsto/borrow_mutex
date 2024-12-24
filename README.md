@@ -12,7 +12,7 @@
 
 # BorrowMutex
 
-**Very initial version!** Use with caution
+**Early version!** We have nontrivial tests, including Miri, but bugs are still expected.
 
 [`BorrowMutex`] is an async Mutex which does not require wrapping the target
 structure. Instead, a `&mut T` can be lended to the mutex at any given time.

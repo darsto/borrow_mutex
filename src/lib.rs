@@ -67,6 +67,7 @@ enum LendState {
 }
 
 impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
+    /// Note: must be a power of 2, and must be >= 2
     pub const MAX_BORROWERS: usize = M;
 
     /// Create a new empty [`BorrowMutex`].
@@ -309,8 +310,8 @@ struct BorrowRef {
     guard_present: AtomicBool,
 }
 
-/// RAII implementation of a "scoped lock" of a mutex. This is an unarmed
-/// variant which is still waiting for a value to be lended.
+/// RAII scoped lock guard. This is an unarmed variant which is still
+/// waiting for a value to be lended.
 ///
 /// This is returned by [`BorrowMutex::borrow()`].
 ///
@@ -335,7 +336,11 @@ pub struct BorrowGuardUnarmed<'g, T: ?Sized> {
 /// Possible borrow errors
 #[derive(Debug)]
 pub enum Error {
+    /// Too many pending borrowers - some need to be lended to before
+    /// more borrowers can be registered
     TooManyBorrows,
+    /// The lending side has signaled that no more borrows can be made,
+    /// at least for the time being.
     Terminated,
 }
 
@@ -461,9 +466,8 @@ impl<T: ?Sized> Drop for BorrowGuardUnarmed<'_, T> {
 
 unsafe impl<T: ?Sized + Send> Send for BorrowGuardUnarmed<'_, T> {}
 
-/// An RAII implementation of a "scoped lock" of a mutex. This is an armed
-/// variant which provides access to the lended value via its [`Deref`] and
-/// [`DerefMut`] implementations.
+/// RAII scoped lock guard. This is an armed variant which provides access
+/// to the lended value via its [`Deref`] and [`DerefMut`] implementations.
 ///
 /// This structure is created by polling [`BorrowGuardUnarmed`] to completion.
 ///
@@ -522,10 +526,8 @@ impl<T: ?Sized> Drop for BorrowGuardArmed<'_, T> {
 unsafe impl<T: ?Sized + Send> Send for BorrowGuardArmed<'_, T> {}
 unsafe impl<T: ?Sized + Sync> Sync for BorrowGuardArmed<'_, T> {}
 
-/// A Future of the [`BorrowMutex`] which resolves as soon as any borrow request
-/// is pending.
-///
-/// This structure is created by [`BorrowMutex::wait_to_lend()`].
+/// A Future returned by [`BorrowMutex::wait_to_lend()`] which resolves
+/// as soon as any borrow request is pending.
 pub struct LendWaiter<'m, T: ?Sized> {
     mutex: BorrowMutexRef<'m, T>,
 }
@@ -563,13 +565,13 @@ impl<T: ?Sized> Future for LendWaiter<'_, T> {
 
 unsafe impl<T: ?Sized> Send for LendWaiter<'_, T> {}
 
-/// An RAII implementation of a "scoped lock" of a lending side of a mutex.
-/// This structure is created by [`BorrowMutex::lend()`], and is associated
-/// with a certain borrower.
+/// RAII scoped lock guard for the lending side. This is created by
+/// [`BorrowMutex::lend()`], and has to be polled until the associated
+/// borrower drops.
 ///
-/// This structure can be dropped immediately (without any polling), or can
-/// be polled to completion before being dropped. Trying to drop it
-/// prematurely will cause the entire process to abort.
+/// This structure can be dropped immediately (without any polling), or
+/// it has to be polled to completion before being dropped. Trying to drop
+/// it prematurely will cause the entire process to abort.
 ///
 /// On the first poll of [`LendGuard`] the associated [`BorrowGuardUnarmed`]
 /// will resolve (effectively - it will turned armed), and [`LendGuard`] will
