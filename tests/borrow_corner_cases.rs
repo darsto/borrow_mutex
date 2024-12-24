@@ -89,3 +89,55 @@ fn borrow_basic_immediate_drop() {
 
     futures::executor::block_on(t2);
 }
+
+#[test]
+fn borrow_basic_double_lend() {
+    let mutex = Arc::new(BorrowMutex::<16, TestObject>::new());
+
+    let _t1 = {
+        let mutex = mutex.clone();
+        std::thread::spawn(move || {
+            futures::executor::block_on(async move {
+                start_lending(mutex).await;
+            });
+        })
+    };
+
+    let _t2 = {
+        let mutex = mutex.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            futures::executor::block_on(async move {
+                assert!(mutex.lend(&mut TestObject {}).is_none());
+            });
+        })
+    };
+
+    std::thread::sleep(Duration::from_millis(300));
+
+    let t3 = async {
+        let normal_borrow = futures::select! {
+            _ = Delay::new(Duration::from_millis(300)).fuse() => {
+                Err(())
+            }
+            _ = mutex.borrow().fuse() => {
+                Ok(())
+            }
+        };
+        assert!(normal_borrow.is_ok());
+        println!("normal_borrow ok");
+
+        let another_borrow = futures::select! {
+            _ = Delay::new(Duration::from_millis(300)).fuse() => {
+                Err(())
+            }
+            _ = mutex.borrow().fuse() => {
+                Ok(())
+            }
+        };
+        assert!(another_borrow.is_ok());
+        println!("another_borrow ok");
+    };
+
+    futures::executor::block_on(t3);
+}

@@ -36,7 +36,7 @@ fn borrow_basic_single_thread() {
             }
         }
 
-        mutex.terminate().await;
+        mutex.terminate().await.unwrap();
     };
 
     let t2 = async {

@@ -111,7 +111,6 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     ///
     /// This can be called concurrently from multiple async contexts but only
     /// one wait-er is guaranteed to be awoken.
-    /// See [`BorrowMutex::lend()`] for its concurency limitations.
     pub fn wait_to_lend<'g, 'm: 'g>(&'m self) -> LendWaiter<'g, T> {
         LendWaiter {
             mutex: self.as_ptr(),
@@ -119,30 +118,31 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     }
 
     /// Lend a mutable reference to the first waiting borrower (FIFO order).
-    /// This can be called even if there are no borrowers at the time (and will
-    /// immediately return None). It is recommended to first call
-    /// [`BorrowMutex::wait_to_lend()`].
+    /// The usual pattern is to select! on [`BorrowMutex::wait_to_lend()`],
+    /// then [`lend()`] and await.
+    /// The await returns after the borrower drops.
+    ///
+    /// This can be also called when there are no borrowers at the time,
+    /// and the returned [`LendGuard`] will effectively wait until the first
+    /// borrower appears.
+    ///
+    /// This can fail and return None when either:
+    /// - someone else is currently lending
+    /// - someone else is currently terminating the mutex
     ///
     /// On successful lend, a [`LendGuard`] future is returned which:
-    ///  - can be immediately dropped, which makes the whole operation invisible
-    ///    to the borrower - it will keep waiting for another lender
-    ///  - or, can be polled, and then dropped only once it resolves (to nothing).
+    /// - can be immediately dropped, which makes the whole operation invisible
+    ///   to the borrower - it will keep waiting for another lender
+    /// - or, can be polled, and then has to be polled until completion
     ///
     /// The first poll will awake the borrower. Dropping the [`LendGuard`] before
     /// it resolves (which implies - before the borrowing side drops its guard)
-    /// will abort the process. Forgetting it via [`core::mem::forget()`] or
-    /// similar cannot be detected at runtime, and may allow **Undefined Behavior**.
-    /// The API should be marked unsafe, but it's not. Hopefully this broken
-    /// behavior could be prohibited in future rust versions with some
-    /// `#[must_drop]` annotation.
+    /// will abort the process.
     ///
-    /// # Note
+    /// **Do not** forget the [`LendGuard`] with [`core::mem::forget()`] or similar,
+    /// as it may cause Undefined Behavior.
     ///
-    /// Only one value may be lended to the mutex at a time. Trying to lend
-    /// while a previous [`LendGuard`] still exists will abort the entire process.
-    ///
-    /// Trying to lend after a mutex was terminated ([`BorrowMutex::terminate()`])
-    /// will also abort the process.
+    /// [`lend()`]: Self::lend()
     pub fn lend<'g, 'm: 'g>(&'m self, value: &'g mut T) -> Option<LendGuard<'g, T>> {
         if let Err(prev) = self.state.compare_exchange(
             LendState::None as u8,
@@ -150,72 +150,74 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
             Ordering::Acquire,
             Ordering::Acquire,
         ) {
-            // we could return None, but this would be ill-advised to try to
-            // handle it. The rest of error handling uses abort(), so do the
-            // same here for consistency.
-            if prev == LendState::Terminating as u8 || prev == LendState::Terminated as u8 {
-                abort("BorrowMutex lended to while terminated");
+            if prev == LendState::Terminated as u8 {
+                if self
+                    .state
+                    .compare_exchange(
+                        LendState::Terminated as u8,
+                        LendState::Starting as u8,
+                        Ordering::Acquire,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return None;
+                }
             } else {
-                abort("multiple distinct references lended to a BorrowMutex");
+                return None;
             }
         }
 
-        // SAFETY: We're the only ones writing this value and [`BorrowMutex::lender_lended`]
-        // atomic makes sure no one is currently reading it
+        // SAFETY: [`self.state`] makes sure we're the only ones accessing
+        // this value
         unsafe { *self.inner_ref.get() = Some(NonNull::from(value)) };
         self.state
             .store(LendState::Lending as u8, Ordering::Release);
 
-        // SAFETY: We're the only lend-er, and the object in MPMC gets only
-        // de-queued and invalidated by the lender.
-        let borrow = self.borrowers.peek()?;
-        let borrow = unsafe { &*borrow.get() };
         Some(LendGuard {
             mutex: self.as_ptr(),
-            borrow,
             _marker: PhantomPinned,
         })
     }
 
-    /// Mark the mutex as terminated, meaning any borrows requests (pending or
-    /// to-be-made) will return [`Error::Terminated`].
+    /// Make any borrows requests (pending or to-be-made) return
+    /// [`Error::Terminated`].
+    ///
+    /// The mutex remains terminated until another [`BorrowMutex::lend()`]
+    /// is called.
+    ///
+    /// This can also fail and return None when either:
+    /// - someone else is currently lending
+    /// - someone else is currently terminating the mutex
     ///
     /// # Note
     ///
     /// This is an async function as the existing borrowers need to be awoken
     /// one by one to drop their guard, which then allows this function to
     /// proceed. This only applies to existing borrowers - Any borrows made
-    /// while this function is executing will immediately return an error on
-    /// the first poll.
-    ///
-    /// Calling this function while a value is lended will abort the process.
-    pub async fn terminate(&self) {
+    /// after the function was polled at least once will immediately return
+    /// an error on the first poll.
+    pub async fn terminate(&self) -> Option<()> {
         if let Err(prev) = self.state.compare_exchange(
             LendState::None as u8,
             LendState::Terminating as u8,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
-            if prev == LendState::Terminating as u8 || prev == LendState::Terminated as u8 {
-                return;
+            if prev == LendState::Terminated as u8 {
+                return Some(());
             } else {
-                // we can't gracefully proceed now, so abort the entire process
-                abort("BorrowMutex terminated while a reference is lended");
+                return None;
             }
         }
 
-        // Make sure self.terminated is immediately visible for concurrent
-        // borrowers as well as lenders
+        // Make sure LendState::Terminating is visible for concurrent borrowers
+        // as well as lenders before we proceed
         atomic::fence(Ordering::SeqCst);
 
-        while let Some(borrow) = self.borrowers.peek() {
-            // SAFETY: we're the only "lend-er", and the object in MPMC will be
-            // de-queued and invalidated only by us. There are no other mutable
-            // references to this object, so soundness properties are preserved.
-            let borrow = unsafe { &*borrow.get() };
+        while !self.borrowers.is_empty() {
             let lend_guard = LendGuard {
                 mutex: self.as_ptr(),
-                borrow,
                 _marker: PhantomPinned,
             };
 
@@ -227,6 +229,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
 
         self.state
             .store(LendState::Terminated as u8, Ordering::Release);
+        Some(())
     }
 
     #[inline]
@@ -306,8 +309,8 @@ struct BorrowRef {
     guard_present: AtomicBool,
 }
 
-/// An RAII implementation of a "scoped lock" of a mutex. This is an unarmed
-/// variant which is still awaiting a value to be lended.
+/// RAII implementation of a "scoped lock" of a mutex. This is an unarmed
+/// variant which is still waiting for a value to be lended.
 ///
 /// This is returned by [`BorrowMutex::borrow()`].
 ///
@@ -573,7 +576,6 @@ unsafe impl<T: ?Sized> Send for LendWaiter<'_, T> {}
 /// resolve once the armed guard - [`BorrowGuardArmed`] - is dropped.
 pub struct LendGuard<'l, T: ?Sized> {
     mutex: BorrowMutexRef<'l, T>,
-    borrow: &'l BorrowRef,
     _marker: PhantomPinned,
 }
 
@@ -582,14 +584,20 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if !self.borrow.ref_acquired.swap(true, Ordering::Relaxed) {
-            // first time polling this LendGuard, so wake the Borrower
-            atomic_waker::wake(&self.borrow.borrow_waker, &self.borrow.borrow_waker_state);
+        // SAFETY: We're the only lend-er, and the object in MPMC gets only
+        // de-queued and invalidated by the lender.
+        let borrow = self.mutex.borrowers().peek().map(|b| unsafe { &*b.get() });
 
-            // the BorrowGuard could have been already dropped and won't wake us
-            // again, so check now
-            if !self.borrow.guard_present.load(Ordering::Acquire) {
-                return Poll::Ready(());
+        if let Some(borrow) = &borrow {
+            if !borrow.ref_acquired.swap(true, Ordering::Relaxed) {
+                // first time polling this LendGuard, so wake the Borrower
+                atomic_waker::wake(&borrow.borrow_waker, &borrow.borrow_waker_state);
+
+                // the BorrowGuard could have been already dropped and won't wake us
+                // again, so check now
+                if !borrow.guard_present.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
             }
         }
 
@@ -601,7 +609,10 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
         {
             // lend_waiter could have been awoken due to a new BorrowGuard,
             // but we're pending until our BorrowGuard is dropped
-            if !self.borrow.guard_present.load(Ordering::Acquire) {
+            if match borrow {
+                None => false,
+                Some(b) => !b.guard_present.load(Ordering::Acquire),
+            } {
                 return Poll::Ready(());
             }
         }
@@ -612,21 +623,25 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
 
 impl<T: ?Sized> Drop for LendGuard<'_, T> {
     fn drop(&mut self) {
-        let guard_present = self.borrow.guard_present.load(Ordering::Acquire);
-        if self.borrow.ref_acquired.load(Ordering::Relaxed) && guard_present {
-            // the mutable reference is about to be re-gained in the lending context while
-            // it's still used in the borrowed context. We can't let that happen, and we can't
-            // even panic here as this may invalidate the referenced object. If the borrow is
-            // happening independently of this panic (i.e. on another thread) it would be UB.
-            // So abort the entire process here.
-            abort("LendGuard dropped while the reference is still borrowed");
+        // SAFETY: We're the only lend-er, and the object in MPMC gets only
+        // de-queued and invalidated by the lender.
+        let borrow = self.mutex.borrowers().peek().map(|b| unsafe { &*b.get() });
+        if let Some(borrow) = borrow {
+            let guard_acquired = borrow.ref_acquired.load(Ordering::Relaxed);
+            let guard_present = borrow.guard_present.load(Ordering::Acquire);
+            if guard_acquired && guard_present {
+                // the mutable reference is about to be re-gained in the lending context while
+                // it's still used in the borrowed context. We can't let that happen, and we can't
+                // even panic here as this may invalidate the referenced object. If the borrow is
+                // happening independently of this panic (i.e. on another thread) it would be UB.
+                // So abort the entire process here.
+                abort("LendGuard dropped while the reference is still borrowed");
+            }
+            unsafe { *self.mutex.inner_ref.get() = None };
+            if guard_acquired {
+                let _ = self.mutex.borrowers().pop().unwrap();
+            }
         }
-        unsafe { *self.mutex.inner_ref.get() = None };
-        if self.borrow.ref_acquired.load(Ordering::Relaxed) {
-            let _ = self.mutex.borrowers().pop().unwrap();
-        }
-        // self.borrow should be no longer accessed (it's still valid memory with
-        // valid initialized data, but might be reused by someone else now)
         let _ = self.mutex.state.compare_exchange(
             LendState::Lending as u8,
             LendState::None as u8,

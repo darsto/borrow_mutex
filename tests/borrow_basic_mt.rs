@@ -42,7 +42,7 @@ fn borrow_basic_double_thread() {
                 }
             }
 
-            t1_mutex.terminate().await;
+            t1_mutex.terminate().await.unwrap();
         })
     });
 
@@ -92,7 +92,7 @@ fn borrow_basic_multi_borrow() {
                 }
             }
 
-            t1_mutex.terminate().await;
+            t1_mutex.terminate().await.unwrap();
         })
     });
 

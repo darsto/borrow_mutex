@@ -43,7 +43,7 @@ fn borrow_basic_double_thread_smol() {
             }
         }
 
-        t1_mutex.terminate().await;
+        t1_mutex.terminate().await.unwrap();
     });
 
     let t2_mutex = mutex.clone();

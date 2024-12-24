@@ -103,7 +103,7 @@ let f2 = async {
         }
     }
 
-    mutex.terminate().await;
+    mutex.terminate().await.unwrap();
 };
 
 futures::executor::block_on(async {

@@ -89,7 +89,7 @@ fn borrow_dyn_single_thread() {
         futures::join!(tborrower, async {
             t1.await;
             t2.await;
-            mutex.terminate().await;
+            mutex.terminate().await.unwrap();
         });
     });
 }
@@ -171,7 +171,7 @@ fn borrow_dyn_multi_thread() {
     std::thread::spawn(f1).join().unwrap();
     std::thread::spawn(f2).join().unwrap();
     futures::executor::block_on(async move {
-        mutex.terminate().await;
+        mutex.terminate().await.unwrap();
     });
     tborrower.join().unwrap();
 }
@@ -258,7 +258,7 @@ fn borrow_dyn_multi_thread_multi_borrow() {
     std::thread::spawn(f1).join().unwrap();
     std::thread::spawn(f2).join().unwrap();
     futures::executor::block_on(async move {
-        mutex.terminate().await;
+        mutex.terminate().await.unwrap();
     });
     for t in tborrowers {
         t.join().unwrap();
