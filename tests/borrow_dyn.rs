@@ -70,7 +70,7 @@ fn borrow_dyn_single_thread() {
     };
 
     let tborrower = async {
-        while let Ok(mut any) = mutex.borrow().await {
+        while let Ok(mut any) = mutex.try_borrow().await {
             if let Some(test) = any.downcast_mut::<TestObject>() {
                 test.counter += 1;
                 println!("t3: counter: {}", test.counter);
@@ -152,7 +152,7 @@ fn borrow_dyn_multi_thread() {
     let tborrower_mutex = mutex.clone();
     let tborrower = std::thread::spawn(|| {
         futures::executor::block_on(async move {
-            while let Ok(mut any) = tborrower_mutex.borrow().await {
+            while let Ok(mut any) = tborrower_mutex.try_borrow().await {
                 if let Some(test) = any.downcast_mut::<TestObject>() {
                     test.counter += 1;
                     println!("t3: counter: {}", test.counter);
@@ -237,7 +237,7 @@ fn borrow_dyn_multi_thread_multi_borrow() {
         let tborrower_mutex = mutex.clone();
         let tborrower = std::thread::spawn(move || {
             futures::executor::block_on(async move {
-                while let Ok(mut any) = tborrower_mutex.borrow().await {
+                while let Ok(mut any) = tborrower_mutex.try_borrow().await {
                     if let Some(test) = any.downcast_mut::<TestObject>() {
                         test.counter += 1;
                         println!("t{n}: counter: {}", test.counter);

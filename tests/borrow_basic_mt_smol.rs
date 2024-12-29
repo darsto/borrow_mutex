@@ -50,7 +50,7 @@ fn borrow_basic_double_thread_smol() {
     let t2 = smol::spawn(async move {
         eprintln!("t2 thread: {:?}", std::thread::current());
 
-        while let Ok(mut test) = t2_mutex.borrow().await {
+        while let Ok(mut test) = t2_mutex.try_borrow().await {
             test.counter += 1;
             eprintln!("t2: counter: {}", test.counter);
             drop(test);

@@ -69,7 +69,7 @@ let f1 = async {
     // - the mutex was terminated - i.e. because the lending side knows it
     //   won't lend anymore
     // We eventually expect the latter here
-    while let Ok(mut test) = mutex.borrow().await {
+    while let Ok(mut test) = mutex.try_borrow().await {
         test.counter += 1; // mutate the object!
         println!("f1: counter: {}", test.counter);
         drop(test);
@@ -132,7 +132,7 @@ struct TestStruct {
 let mutex = BorrowMutex::<16, TestStruct>::new();
 let mut test = TestStruct { counter: 1 };
 
-let mut test_borrow = pin!(mutex.borrow());
+let mut test_borrow = pin!(mutex.try_borrow());
 let _ = test_borrow
     .as_mut()
     .poll(&mut Context::from_waker(&futures::task::noop_waker()));

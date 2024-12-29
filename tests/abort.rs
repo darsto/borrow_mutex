@@ -37,7 +37,7 @@ fn tc_lend_guard_drop() {
 
     let t2 = async {
         Delay::new(Duration::from_millis(100)).await;
-        if let Ok(mut test) = mutex.borrow().await {
+        if let Ok(mut test) = mutex.try_borrow().await {
             test.counter += 1;
         }
     };
@@ -69,7 +69,7 @@ fn tc_early_lend_guard_drop() {
 
     let t2 = async {
         Delay::new(Duration::from_millis(100)).await;
-        if let Ok(mut test) = mutex.borrow().await {
+        if let Ok(mut test) = mutex.try_borrow().await {
             Delay::new(Duration::from_millis(100)).await;
             test.counter += 1;
         }

@@ -97,7 +97,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     ///
     /// [`MAX_BORROWERS`]: Self::MAX_BORROWERS
     /// [`Error`]: enum@crate::Error
-    pub fn borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, T> {
+    pub fn try_borrow<'g, 'm: 'g>(&'m self) -> BorrowGuardUnarmed<'g, T> {
         BorrowGuardUnarmed {
             mutex: self.as_ptr(),
             inner: AtomicPtr::new(null_mut()),
@@ -105,7 +105,7 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         }
     }
 
-    /// Wait until [`BorrowMutex::borrow()`] is called.
+    /// Wait until [`BorrowMutex::try_borrow()`] is called.
     /// [`BorrowMutex::lend()`] can be called immediately after.
     ///
     /// # Note
@@ -313,7 +313,7 @@ struct BorrowRef {
 /// RAII scoped lock guard. This is an unarmed variant which is still
 /// waiting for a value to be lended.
 ///
-/// This is returned by [`BorrowMutex::borrow()`].
+/// This is returned by [`BorrowMutex::try_borrow()`].
 ///
 /// It doesn't provide any access to the underlying structure yet, and has to
 /// be polled to completion first. It should resolve into an armed
