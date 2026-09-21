@@ -547,19 +547,48 @@ impl<T: ?Sized> Future for LendWaiter<'_, T> {
         if !self.mutex.borrowers().is_empty() {
             return Poll::Ready(());
         }
-        // LendGuard could have turned Ready without ever polling, so
-        // also handle the spurious wakes here
-        while atomic_waker::poll_const(
-            &self.mutex.lend_waiter,
-            &self.mutex.lend_waiter_state,
-            cx.waker(),
-        ) == Poll::Ready(())
+
+        // Synchronize with lend() itself. We share a lend_waiter with them,
+        // and we must not replace their waker (causing them to never get awoken).
+        // There can be only up to 1 lend()/wait_to_lend() at a time
+        if self
+            .mutex
+            .state
+            .compare_exchange(
+                LendState::None as u8,
+                LendState::Starting as u8,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_err()
         {
-            if !self.mutex.borrowers().is_empty() {
-                return Poll::Ready(());
-            }
+            return Poll::Pending;
         }
-        Poll::Pending
+
+        // Consume spurious notifications until either a borrower is visible
+        // or poll_const() parks our waker
+        let has_borrower = loop {
+            if atomic_waker::poll_const(
+                &self.mutex.lend_waiter,
+                &self.mutex.lend_waiter_state,
+                cx.waker(),
+            ) == Poll::Pending
+            {
+                break false;
+            }
+            if !self.mutex.borrowers().is_empty() {
+                break true;
+            }
+        };
+
+        self.mutex
+            .state
+            .store(LendState::None as u8, Ordering::Release);
+        if has_borrower {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -586,14 +615,24 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: We're the only lend-er, and the object in MPMC gets only
-        // de-queued and invalidated by the lender.
-        let borrow = self.mutex.borrowers().peek().map(|b| unsafe { &*b.get() });
+        loop {
+            // Poll before peeking so the queue check below is fresh. If this
+            // parks our waker, any borrower enqueued after the check will wake us.
+            let notification = atomic_waker::poll_const(
+                &self.mutex.lend_waiter,
+                &self.mutex.lend_waiter_state,
+                cx.waker(),
+            );
 
-        if let Some(borrow) = &borrow {
-            if !borrow.ref_acquired.swap(true, Ordering::Relaxed) {
-                // first time polling this LendGuard, so wake the Borrower
-                atomic_waker::wake(&borrow.borrow_waker, &borrow.borrow_waker_state);
+            // SAFETY: We're the only lend-er, and the object in MPMC gets only
+            // de-queued and invalidated by the lender.
+            let borrow = self.mutex.borrowers().peek().map(|b| unsafe { &*b.get() });
+
+            if let Some(borrow) = borrow {
+                if !borrow.ref_acquired.swap(true, Ordering::Relaxed) {
+                    // first time polling this LendGuard, so wake the Borrower
+                    atomic_waker::wake(&borrow.borrow_waker, &borrow.borrow_waker_state);
+                }
 
                 // the BorrowGuard could have been already dropped and won't wake us
                 // again, so check now
@@ -601,25 +640,14 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
                     return Poll::Ready(());
                 }
             }
-        }
 
-        while atomic_waker::poll_const(
-            &self.mutex.lend_waiter,
-            &self.mutex.lend_waiter_state,
-            cx.waker(),
-        ) == Poll::Ready(())
-        {
-            // lend_waiter could have been awoken due to a new BorrowGuard,
-            // but we're pending until our BorrowGuard is dropped
-            if match borrow {
-                None => false,
-                Some(b) => !b.guard_present.load(Ordering::Acquire),
-            } {
-                return Poll::Ready(());
+            if notification == Poll::Pending {
+                return Poll::Pending;
             }
-        }
 
-        Poll::Pending
+            // The notification may represent a newly enqueued borrower or may
+            // be spurious. Poll again to register for the next state change.
+        }
     }
 }
 
