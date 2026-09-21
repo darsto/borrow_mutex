@@ -169,3 +169,62 @@ code. It's hardly useful to call [`core::mem::forget()`] on a future.
 
 [`Arc`]: std::sync::Arc
 [`Mutex`]: std::sync::Mutex
+
+## Benchmarks
+
+Run the Criterion throughput suite and the fairness diagnostic with:
+
+```console
+cargo bench --bench mutex
+cargo bench --bench fairness
+```
+
+The benchmark tooling currently requires Rust 1.85 or newer because of
+Criterion's transitive dependencies; this does not change the library's Rust
+1.65 MSRV.
+
+The suite compares `BorrowMutex`, `smol::lock::Mutex`, and
+`tokio::sync::Mutex` on the same single-thread Tokio runtime. This matches
+`BorrowMutex`'s primary use case, prevents task migration from affecting the
+handoff measurements, and keeps executor scheduling common to all three
+implementations. Criterion's batched setup constructs the mutex,
+spawns the tasks, and parks every user before timing starts; mutex destruction
+also happens after timing ends. One barrier release and task join per batch
+remain as amortized executor overhead. Throughput is reported in protected-value
+operations:
+
+- `uncontended`: a conventional mutex has one task perform 1,000 lock/unlock
+  operations. The `BorrowMutex` lender already owns the value, so it performs
+  1,000 direct operations and polls `wait_to_lend()` once per operation with
+  `now_or_never()`, asserting that no borrower is waiting. It never lends and
+  has no borrower task.
+- `contended`: `N` means total value users. A conventional mutex has `N` locking
+  tasks. `BorrowMutex` has one lender and `N-1` borrowers. The lender starts
+  with the value, and every user performs 1,000 operations and yields while it
+  owns the value. The cases use 2, 8, and 32 total users.
+
+The separate `fairness` target makes the same 2, 8, or 32 users compete for a
+fixed total of 100,000 operations. Its `BorrowMutex` case likewise counts the
+lender as one user and uses `N-1` borrowers. It prints throughput, each user's
+operation count, and [Jain's fairness index](https://en.wikipedia.org/wiki/Jain%27s_fairness_index),
+where `1.0` means an even distribution. This is a diagnostic rather than a
+Criterion timing test because aggregate elapsed time alone cannot show
+starvation.
+
+Run only one Criterion scenario by passing its name as a filter, for example:
+
+```console
+cargo bench --bench mutex -- contended/2
+```
+
+`BorrowMutex` uses 64 borrower slots. Its lender handoff is inherent to its
+ownership model, so the implementations do not have identical synchronization
+mechanics. The workloads instead equalize the number of value users, protected
+value operations, and yields while each user owns the value.
+
+The barrier and repeated-lock workload is adapted from the methodology of
+[ytakano/async_bench](https://github.com/ytakano/async_bench). The contention
+interpretation was also informed by
+[khonsulabs/async-locking-benchmarks](https://github.com/khonsulabs/async-locking-benchmarks),
+and the per-worker fairness reporting follows the methodology used by
+[mutex-benches](https://github.com/cuongleqq/mutex-benches).
