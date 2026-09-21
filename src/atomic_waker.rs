@@ -57,16 +57,18 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
         }
         prev if prev & AWOKEN != 0 => {
             debug_assert!(prev == AWOKEN || prev == WAKING | AWOKEN);
-            state.store(IDLING, Release);
+            // The WAKING bit might be happening in parallel and we need to
+            // Acquire-synchronize with it, hence the swap instead of store
+            let _ = state.swap(IDLING, AcqRel);
             Poll::Ready(())
         }
         prev => {
             debug_assert!(prev == WAKING);
             // We're about to be awoken, but we haven't necessarily stored
             // our waker yet and we won't be polled again. We have to return
-            // Ready now, but also make sure to now return Ready multiple
+            // Ready now, but also make sure to not return Ready multiple
             // times from a single wake - for that reason we have a wait
-            while state.load(Relaxed) & AWOKEN != 0 {
+            while state.load(Relaxed) & AWOKEN == 0 {
                 core::hint::spin_loop();
             }
             Poll::Ready(())
