@@ -5,6 +5,7 @@ use std::{any::Any, sync::Arc, time::Duration};
 
 use futures::FutureExt;
 use futures_timer::Delay;
+use tokio::sync::Mutex as AsyncMutex;
 
 use borrow_mutex::BorrowMutex;
 
@@ -24,7 +25,7 @@ struct AnotherTestObject {
 fn borrow_dyn_single_thread() {
     let mutex = BorrowMutex::<16, dyn Any>::new();
 
-    let t1 = async {
+    let tlender = async {
         let mut test = TestObject { counter: 1 };
         loop {
             if test.counter >= 20 {
@@ -42,9 +43,7 @@ fn borrow_dyn_single_thread() {
                 }
             }
         }
-    };
 
-    let t2 = async {
         let mut test = AnotherTestObject {
             is_even: false,
             another_counter: 1,
@@ -67,6 +66,8 @@ fn borrow_dyn_single_thread() {
                 }
             }
         }
+
+        mutex.terminate().await.unwrap();
     };
 
     let tborrower = async {
@@ -86,19 +87,19 @@ fn borrow_dyn_single_thread() {
     };
 
     futures::executor::block_on(async {
-        futures::join!(tborrower, async {
-            t1.await;
-            t2.await;
-            mutex.terminate().await.unwrap();
-        });
+        futures::join!(tborrower, tlender);
     });
 }
 
 #[test]
 fn borrow_dyn_multi_thread() {
     let mutex = Arc::new(BorrowMutex::<16, dyn Any + Send>::new());
+    // BorrowMutex is designed for a single lender at a time. If one wait_to_lend/lend is currently
+    // blocking, the wait_to_lend() will immediately resolve and lend() will return error.
+    // To properly synchronize we can wrap the lending part with a mutex.
+    let lender_mutex = Arc::new(AsyncMutex::new(mutex.clone()));
 
-    let f1_mutex = mutex.clone();
+    let f1_lender_mutex = lender_mutex.clone();
     let f1 = move || {
         futures::executor::block_on(async move {
             let mut test = TestObject { counter: 1 };
@@ -113,15 +114,15 @@ fn borrow_dyn_multi_thread() {
                         }
                         println!("t1: counter: {}", test.counter);
                     }
-                    _ = f1_mutex.wait_to_lend().fuse() => {
-                        f1_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
+                    _lender = wait_to_lend(&f1_lender_mutex).fuse() => {
+                        _lender.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
         })
     };
 
-    let f2_mutex = mutex.clone();
+    let f2_lender_mutex = lender_mutex.clone();
     let f2 = move || {
         futures::executor::block_on(async move {
             let mut test = AnotherTestObject {
@@ -141,8 +142,8 @@ fn borrow_dyn_multi_thread() {
                         println!("t2: another_counter: {}", test.another_counter);
                         assert_eq!(test.is_even, test.another_counter % 2 == 0);
                     }
-                    _ = f2_mutex.wait_to_lend().fuse() => {
-                        f2_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
+                    _lender = wait_to_lend(&f2_lender_mutex).fuse() => {
+                        _lender.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
@@ -179,8 +180,9 @@ fn borrow_dyn_multi_thread() {
 #[test]
 fn borrow_dyn_multi_thread_multi_borrow() {
     let mutex = Arc::new(BorrowMutex::<16, dyn Any + Send>::new());
+    let lender_mutex = Arc::new(AsyncMutex::new(mutex.clone()));
 
-    let f1_mutex = mutex.clone();
+    let f1_lender_mutex = lender_mutex.clone();
     let f1 = move || {
         futures::executor::block_on(async move {
             let mut test = TestObject { counter: 1 };
@@ -195,15 +197,15 @@ fn borrow_dyn_multi_thread_multi_borrow() {
                         }
                         println!("t1: counter: {}", test.counter);
                     }
-                    _ = f1_mutex.wait_to_lend().fuse() => {
-                        f1_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
+                    _lender = wait_to_lend(&f1_lender_mutex).fuse() => {
+                        _lender.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
         })
     };
 
-    let f2_mutex = mutex.clone();
+    let f2_lender_mutex = lender_mutex.clone();
     let f2 = move || {
         futures::executor::block_on(async move {
             let mut test = AnotherTestObject {
@@ -223,8 +225,8 @@ fn borrow_dyn_multi_thread_multi_borrow() {
                         println!("t2: another_counter: {}", test.another_counter);
                         assert_eq!(test.is_even, test.another_counter % 2 == 0);
                     }
-                    _ = f2_mutex.wait_to_lend().fuse() => {
-                        f2_mutex.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
+                    _lender = wait_to_lend(&f2_lender_mutex).fuse() => {
+                        _lender.lend(&mut test as &mut (dyn Any + Send)).unwrap().await
                     }
                 }
             }
@@ -263,4 +265,12 @@ fn borrow_dyn_multi_thread_multi_borrow() {
     for t in tborrowers {
         t.join().unwrap();
     }
+}
+
+async fn wait_to_lend(
+    lender_mutex: &AsyncMutex<Arc<BorrowMutex<16, dyn Any + Send>>>,
+) -> tokio::sync::MutexGuard<'_, Arc<BorrowMutex<16, dyn Any + Send>>> {
+    let lender = lender_mutex.lock().await;
+    lender.wait_to_lend().await;
+    lender
 }
