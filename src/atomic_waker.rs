@@ -57,7 +57,7 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
         }
         prev if prev & AWOKEN != 0 => {
             debug_assert!(prev == AWOKEN || prev == WAKING | AWOKEN);
-            // The WAKING bit might be happening in parallel and we need to
+            // another WAKING bit might be happening in parallel and we need to
             // Acquire-synchronize with it, hence the swap instead of store
             let _ = state.swap(IDLING, AcqRel);
             Poll::Ready(())
@@ -67,11 +67,38 @@ pub fn poll_const(atomic_waker: &AtomicWaker, state: &AtomicWakerState, waker: &
             // We're about to be awoken, but we haven't necessarily stored
             // our waker yet and we won't be polled again. We have to return
             // Ready now, but also make sure to not return Ready multiple
-            // times from a single wake - for that reason we have a wait
-            while state.load(Relaxed) & AWOKEN == 0 {
+            // times from a single wake - for that reason we have a wait.
+            // Try to busywait up for a short while, then fallback to waking
+            // up ourselves immediately (telling the scheduler to call us again)
+            const SPIN_LIMIT: usize = 16;
+
+            for _ in 0..SPIN_LIMIT {
+                let cur = state.load(Acquire);
+                if cur & AWOKEN != 0 {
+                    // We got awoken (AWOKEN or WAKING|AWOKEN). Consume it, but only
+                    // if no other poller started consuming it in parallel
+                    if state
+                        .compare_exchange(cur & !REGISTERING, IDLING, AcqRel, Relaxed)
+                        .is_ok()
+                    {
+                        return Poll::Ready(());
+                    } else {
+                        break;
+                    }
+                }
+
+                // Not AWOKEN and no longer WAKING -> another polled consumed it
+                if cur & WAKING == 0 {
+                    break;
+                }
+
                 core::hint::spin_loop();
             }
-            Poll::Ready(())
+
+            // We could not complete synchronously. Ensure we're polled again
+            let _ = state.compare_exchange(WAKING | REGISTERING, WAKING, AcqRel, Relaxed);
+            waker.wake_by_ref();
+            Poll::Pending
         }
     }
 }
