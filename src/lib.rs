@@ -51,7 +51,9 @@ mod atomic_waker;
 pub struct BorrowMutex<const MAX_BORROWERS: usize, T: ?Sized> {
     inner_ref: UnsafeCell<Option<NonNull<T>>>,
     lend_waiter: AtomicWaker,
+    lend_guard_waker: AtomicWaker,
     lend_waiter_state: AtomicWakerState,
+    lend_guard_waker_state: AtomicWakerState,
     state: AtomicU8,
     borrowers: MPMC<MAX_BORROWERS, BorrowRef>,
 }
@@ -75,7 +77,9 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
         Self {
             inner_ref: UnsafeCell::new(None),
             lend_waiter: AtomicWaker::new(None),
+            lend_guard_waker: AtomicWaker::new(None),
             lend_waiter_state: AtomicWakerState::new(0),
+            lend_guard_waker_state: AtomicWakerState::new(0),
             state: AtomicU8::new(LendState::None as u8),
             borrowers: MPMC::new(),
         }
@@ -242,8 +246,8 @@ impl<const M: usize, T: ?Sized> BorrowMutex<M, T> {
     /// in rust version pre-1.77.
     const fn borrowers_offset() -> usize {
         let offset = size_of::<UnsafeCell<Option<NonNull<T>>>>()
-            + size_of::<AtomicWaker>()
-            + size_of::<AtomicWakerState>()
+            + size_of::<AtomicWaker>() * 2
+            + size_of::<AtomicWakerState>() * 2
             + size_of::<AtomicU8>();
 
         let align = align_of::<MPMC<M, BorrowRef>>();
@@ -390,6 +394,10 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
             // borrow guard will turn ready when any lend guard sees us, so
             // try to awake any sleeping one
             atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
+            atomic_waker::wake(
+                &self.mutex.lend_guard_waker,
+                &self.mutex.lend_guard_waker_state,
+            );
             self.inner.store(inner.get(), Ordering::Relaxed);
             // The mutex could've been terminated just after we pushed to the ring
             atomic::fence(Ordering::SeqCst);
@@ -432,8 +440,8 @@ impl<'g, T: 'g + ?Sized> Future for BorrowGuardUnarmed<'g, T> {
         // enough - the returned guard has the same lifetime
         let (lend_waiter, lend_waiter_state) = unsafe {
             (
-                std::mem::transmute(&self.mutex.lend_waiter),
-                std::mem::transmute(&self.mutex.lend_waiter_state),
+                core::mem::transmute(&self.mutex.lend_guard_waker),
+                core::mem::transmute(&self.mutex.lend_guard_waker_state),
             )
         };
         Poll::Ready(Ok(BorrowGuardArmed {
@@ -458,7 +466,10 @@ impl<T: ?Sized> Drop for BorrowGuardUnarmed<'_, T> {
                     .guard_present
                     .store(false, Ordering::Relaxed);
                 // self.inner is no longer valid
-                atomic_waker::wake(&self.mutex.lend_waiter, &self.mutex.lend_waiter_state);
+                atomic_waker::wake(
+                    &self.mutex.lend_guard_waker,
+                    &self.mutex.lend_guard_waker_state,
+                );
             }
         }
     }
@@ -537,57 +548,22 @@ impl<T: ?Sized> Future for LendWaiter<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // in general case we want to poll the lend_waiter, but it's awoken
-        // on both:
-        // - dropping the BorrowGuard
-        // - creating a new BorrowGuard
-        // And the same lend_waiter is polled in LendGuard, which could have
-        // consumed both of those wakes. Before we start endlessly polling now,
-        // check if we're ready
         if !self.mutex.borrowers().is_empty() {
             return Poll::Ready(());
         }
 
-        // Synchronize with lend() itself. We share a lend_waiter with them,
-        // and we must not replace their waker (causing them to never get awoken).
-        // There can be only up to 1 lend()/wait_to_lend() at a time
-        if self
-            .mutex
-            .state
-            .compare_exchange(
-                LendState::None as u8,
-                LendState::Starting as u8,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-            .is_err()
-        {
-            return Poll::Pending;
-        }
-
-        // Consume spurious notifications until either a borrower is visible
-        // or poll_const() parks our waker
-        let has_borrower = loop {
+        loop {
             if atomic_waker::poll_const(
                 &self.mutex.lend_waiter,
                 &self.mutex.lend_waiter_state,
                 cx.waker(),
             ) == Poll::Pending
             {
-                break false;
+                return Poll::Pending;
             }
             if !self.mutex.borrowers().is_empty() {
-                break true;
+                return Poll::Ready(());
             }
-        };
-
-        self.mutex
-            .state
-            .store(LendState::None as u8, Ordering::Release);
-        if has_borrower {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
         }
     }
 }
@@ -619,8 +595,8 @@ impl<T: ?Sized> Future for LendGuard<'_, T> {
             // Poll before peeking so the queue check below is fresh. If this
             // parks our waker, any borrower enqueued after the check will wake us.
             let notification = atomic_waker::poll_const(
-                &self.mutex.lend_waiter,
-                &self.mutex.lend_waiter_state,
+                &self.mutex.lend_guard_waker,
+                &self.mutex.lend_guard_waker_state,
                 cx.waker(),
             );
 
