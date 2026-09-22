@@ -6,7 +6,7 @@
 
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::{align_of, size_of, MaybeUninit};
+use core::mem::{align_of, size_of, transmute, MaybeUninit};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[repr(C)]
@@ -171,7 +171,7 @@ impl<'a, T> MPMCRef<'a, T> {
 
         // return a pointer to the enqueued element. the caller can dereference
         // this with unsafe if they know what they're doing
-        Ok(unsafe { core::intrinsics::transmute(slot) })
+        Ok(unsafe { transmute(slot) })
     }
 
     pub fn pop(&self) -> Option<T> {
@@ -232,7 +232,7 @@ impl<'a, T> MPMCRef<'a, T> {
         }
 
         let slot = &self.ring()[cons_tail & self.capacity()];
-        Some(unsafe { core::intrinsics::transmute(slot) })
+        Some(unsafe { transmute(slot) })
     }
 }
 
