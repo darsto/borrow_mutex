@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 
-use std::{pin::pin, sync::Arc, task::Context, time::Duration};
+use std::{
+    pin::pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{Context, Poll, Wake, Waker},
+    time::Duration,
+};
 
 use futures::{Future, FutureExt};
 use futures_timer::Delay;
@@ -10,6 +18,50 @@ use borrow_mutex::BorrowMutex;
 
 #[derive(Debug)]
 struct TestObject;
+
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn waiter_and_lend_guard_receive_borrow_notification() {
+    let mutex = BorrowMutex::<16, usize>::new();
+    let waiter_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let lender_wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waiter_waker = Waker::from(waiter_wakes.clone());
+    let lender_waker = Waker::from(lender_wakes.clone());
+    let mut waiter_cx = Context::from_waker(&waiter_waker);
+    let mut lender_cx = Context::from_waker(&lender_waker);
+    let mut waiter = pin!(mutex.wait_to_lend());
+    assert!(waiter.as_mut().poll(&mut waiter_cx).is_pending());
+
+    let mut value = 0;
+    let mut lender = pin!(mutex.lend(&mut value).unwrap());
+    assert!(lender.as_mut().poll(&mut lender_cx).is_pending());
+
+    let mut borrower = pin!(mutex.try_borrow());
+    let borrower_waker = futures::task::noop_waker();
+    let mut borrower_cx = Context::from_waker(&borrower_waker);
+    assert!(borrower.as_mut().poll(&mut borrower_cx).is_pending());
+    assert!(waiter_wakes.0.load(Ordering::Relaxed) > 0);
+    assert!(lender_wakes.0.load(Ordering::Relaxed) > 0);
+    assert_eq!(waiter.as_mut().poll(&mut waiter_cx), Poll::Ready(()));
+
+    assert!(lender.as_mut().poll(&mut lender_cx).is_pending());
+    let Poll::Ready(Ok(guard)) = borrower.as_mut().poll(&mut borrower_cx) else {
+        panic!("borrower did not acquire the reference");
+    };
+    drop(guard);
+    assert_eq!(lender.as_mut().poll(&mut lender_cx), Poll::Ready(()));
+}
 
 async fn start_lending(mutex: Arc<BorrowMutex<16, TestObject>>) {
     let mut test = TestObject;
