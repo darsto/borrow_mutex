@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright(c) 2024 Darek Stojaczyk
 
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc};
 
 use borrow_mutex::BorrowMutex;
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use futures::FutureExt;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::Barrier;
