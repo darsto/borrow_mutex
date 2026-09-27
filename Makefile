@@ -24,7 +24,7 @@ clippy:
 	cargo clippy -- -D warnings
 
 msrv:
-	cargo hack check --rust-version --workspace --lib --ignore-private
+	cargo hack check --rust-version --workspace --lib --ignore-private --no-dev-deps
 
 nostd:
 	RUSTFLAGS='-C panic=abort' cargo build --no-default-features --lib
